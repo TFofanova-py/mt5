@@ -1,0 +1,6 @@
+History/
+venv/
+config_mt5.py
+.pytest_cache/
+Simulation/*.json
+Simulation/*.csv
