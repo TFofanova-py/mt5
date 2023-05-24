@@ -1,4 +1,5 @@
 import numpy as np
+import MetaTrader5 as mt5
 
 N_RANGES = 300
 MIN_PRICE_HIST_PERIOD = 100
@@ -7,4 +8,6 @@ CENTRAL_HIGH_FIB = 0.382
 CENTRAL_LOW_FIB = 0.618
 LOWEST_FIB = 0.764
 NUM_ATTEMPTS_FETCH_PRICES = 10
-N_DOWN_PERIODS = [4, np.inf]  # [3, 4, np.inf]
+N_DOWN_PERIODS = (4, np.inf)  # (3, 4, np.inf)
+
+MT5_TIMEFRAME = {"1m": mt5.TIMEFRAME_M1, "1h": mt5.TIMEFRAME_H1}

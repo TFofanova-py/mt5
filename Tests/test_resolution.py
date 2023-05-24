@@ -1,9 +1,6 @@
 import pytest
 import MetaTrader5 as mt5
 from config_mt5 import Config
-from pair import Pair
-from time import sleep
-from test_open_close import make_pairs
 
 
 @pytest.fixture(scope="module")
@@ -12,22 +9,23 @@ def session():
     yield {"broker": mt5,
            "pairs": {
                "res1_params": {"symbol": "[SP500]",
+                               "data_source": "mt5",
                                "resolution": 1,
                                "deal_size": 1.0,
                                "stop_coefficient": 0.994,
-                               "limit": None,
                                "dft_period": 19},
                "res3_params": {"symbol": "BTCUSD",
+                               "data_source": "mt5",
                                "resolution": 3,
                                "deal_size": 0.5,
                                "stop_coefficient": 0.99,
-                               "limit": None,
                                "dft_period": 34},
                "res6_params": {"symbol": "BTCUSD",
+                               "yahoo_symbol": "BTC-USD",
+                               "data_source": "yahoo",
                                "resolution": 6,
                                "deal_size": 0.5,
                                "stop_coefficient": 0.99,
-                               "limit": None,
                                "dft_period": 34}
            }
            }
@@ -39,10 +37,11 @@ def test_apply_resolution(session, make_pairs):
     for pair_key in make_pairs:
         pair = make_pairs[pair_key]
         pair.fetch_prices(broker)
-        result = pair.apply_resolution()
+        assert pair.prices is not None, "prices is None"
+        result = pair.apply_resolution(pair.prices, pair.resolution, interval="minute")
 
+        assert result is not None and result.shape[0] > 0, "result is None"
         print(f"{pair_key}, {pair.resolution}, {result.index[:5]}")
-        assert result.shape[0] > 0
 
 # #  python -m pytest test_resolution.py
 # # --trace - option for debug

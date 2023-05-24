@@ -1,5 +1,4 @@
 import os
-import time
 
 import MetaTrader5 as mt5
 import numpy as np
@@ -7,8 +6,8 @@ from config_mt5 import Config
 from datetime import datetime, timedelta, timezone
 from time import sleep
 import logging
-from pair import Pair
-from constants import MIN_PRICE_HIST_PERIOD, N_DOWN_PERIODS
+from pair.pair import Pair, parse_du
+from pair.constants import N_DOWN_PERIODS
 import argparse
 
 
@@ -23,7 +22,7 @@ def create_position(broker, pair):
         "sl": round(curr_price * pair.stop_coefficient, abs(int(np.log10(pair.trade_tick_size)))),
         "comment": "python script open",
         "type_time": broker.ORDER_TIME_GTC,
-        "type_filling": broker.ORDER_FILLING_FOK
+        "type_filling": broker.ORDER_FILLING_IOC
     }
 
     # check order before placement
@@ -51,7 +50,7 @@ def close_opened_position(broker, pair):
         "price": curr_price,
         "comment": "python script close",
         "type_time": broker.ORDER_TIME_GTC,
-        "type_filling": broker.ORDER_FILLING_FOK
+        "type_filling": broker.ORDER_FILLING_IOC
     }
     return broker.order_send(request)
 
@@ -76,13 +75,14 @@ def make_dft_trade(broker, pair, prev_trade_result):
             pair.idx_down_periods = pair.idx_down_periods + 1
         logging.info(f"idx_n_down_periods {pair.idx_down_periods}")
     else:
-        dft_signal = pair.get_dft_signal(dft_period=pair.dft_period)
+        dft_signal, _ = pair.get_dft_signal(dft_period=pair.dft_period, verbose=True)
 
     logging.info(f"{pair.symbol}, {t_index}, signal {dft_signal}, curr_dft_position {curr_dft_position}")
 
     if dft_signal != 0:
 
-        if dft_signal == 1 and curr_dft_position == 0 and pair.idx_down_periods != len(N_DOWN_PERIODS) - 1:
+        if dft_signal == 1 and (pair.is_multibuying_available or curr_dft_position == 0):
+            # and pair.idx_down_periods != len(N_DOWN_PERIODS) - 1: - this condition is in get_dft_signal
             resp_open = create_position(broker, pair)
 
             if resp_open is not None:
@@ -145,6 +145,10 @@ if __name__ == '__main__':
     parser.add_argument("--password", "-psw", type=str, default=Config.password, help="MT5 password")
     parser.add_argument("--path", "-pth", type=str, default=Config.path, help="MT5 path")
     parser.add_argument("--down_periods", "-dp", type=str, default="[3, 4]", help="down periods for buy signal")
+    parser.add_argument("--multibuying_avail", "-m", default=False, action="store_true",
+                        help="buying is available even if there is an opened position")
+    parser.add_argument("--upper_timeframe_parameters", "-du", type=str, default=None,
+                        help="upper timeframe (hours) for buying in blue zone")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -170,10 +174,12 @@ if __name__ == '__main__':
                                  dft_period=args.dft_period,
                                  highest_fib=args.highest_fib,
                                  lowest_fib=args.lowest_fib,
-                                 n_down_periods=list(map(int, args.down_periods[1:-1].split(','))) + [np.inf])
+                                 n_down_periods=list(map(int, args.down_periods[1:-1].split(','))) + [np.inf],
+                                 is_multibuying_available=args.multibuying_avail,
+                                 upper_timeframe_parameters=parse_du(args.upper_timeframe_parameters, sep=","))
             if pair_to_trade is not None:
                 trade_const_instrument(mt5, pair_to_trade, tz)
         else:
-            logging.info(f"Choosing pair by bot is not available now")
+            logging.getLogger(__name__).info(f"Choosing pair by bot is not available now")
         mt5.shutdown()
 

@@ -1,7 +1,7 @@
 import pytest
 from pair import Pair
 import pandas as pd
-from check_data import fix_missing, fix_outliers_and_missing
+from pair.check_data import fix_missing, fix_outliers_and_missing
 
 
 @pytest.fixture(scope="function")
@@ -12,7 +12,7 @@ def raw_pair():
                     stop_coef=0.994,
                     dft_period=19)
 
-    raw_pair.prices = pd.read_csv("./History/dft_2022-09-05_3min.csv", usecols=[0, 1, 2, 3, 4], index_col=0)
+    raw_pair.prices = pd.read_csv("../History/dft_2022-09-05_3min.csv", usecols=[0, 1, 2, 3, 4], index_col=0)
     yield raw_pair
 
 

@@ -1,14 +1,17 @@
 import datetime
+import logging
+
 import pytz
 import os.path
 
 import MetaTrader5 as mt5
 import pandas as pd
-from constants import NUM_ATTEMPTS_FETCH_PRICES, \
+from .constants import NUM_ATTEMPTS_FETCH_PRICES, \
     HIGHEST_FIB, CENTRAL_HIGH_FIB, CENTRAL_LOW_FIB, LOWEST_FIB, \
-    N_DOWN_PERIODS, MIN_PRICE_HIST_PERIOD
-from check_data import fix_missing
-from yahoo_utils import get_yahoo_data
+    N_DOWN_PERIODS, MIN_PRICE_HIST_PERIOD, MT5_TIMEFRAME
+from .check_data import fix_missing
+from .yahoo_utils import get_yahoo_data
+from typing import Literal, Tuple
 
 
 class Pair:
@@ -17,7 +20,9 @@ class Pair:
                  stop_coef=0.9995, limit_coef=None, dft_period=24,
                  highest_fib=HIGHEST_FIB, central_high_fib=CENTRAL_HIGH_FIB,
                  lowest_fib=LOWEST_FIB, central_low_fib=CENTRAL_LOW_FIB,
-                 n_down_periods=N_DOWN_PERIODS):
+                 n_down_periods=N_DOWN_PERIODS,
+                 is_multibuying_available=False,
+                 upper_timeframe_parameters=None):
 
         self.symbol = symbol
         self.yahoo_symbol = yahoo_symbol
@@ -42,6 +47,10 @@ class Pair:
         self.lowest_fib = lowest_fib
         self.central_low_fib = central_low_fib
         self.n_down_periods = n_down_periods
+        self.is_multibuying_available = is_multibuying_available
+        self.upper_timeframe_parameters = upper_timeframe_parameters
+        self.u_prices = None
+        self.long_up_trend = None
 
     def save_raw_data(self, data):
         new_data = data
@@ -54,16 +63,16 @@ class Pair:
 
         new_data.to_csv(self.data_file, mode="a", header=False)
 
-    def get_historical_data(self, session, numpoints=MIN_PRICE_HIST_PERIOD):
+    def get_historical_data(self, session, interval="1m",  numpoints=MIN_PRICE_HIST_PERIOD):
         i = 0
         rates = None
 
         while i < NUM_ATTEMPTS_FETCH_PRICES:
 
             if self.data_source == "mt5":
-                rates = session.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, numpoints)
+                rates = session.copy_rates_from_pos(self.symbol, MT5_TIMEFRAME[interval], 0, numpoints)
             elif self.data_source == "yahoo":
-                rates = get_yahoo_data(self.yahoo_symbol)
+                rates = get_yahoo_data(self.yahoo_symbol, interval=interval)
 
             if rates is None:
                 i += 1
@@ -78,20 +87,36 @@ class Pair:
             curr_prices = curr_prices[["close", "open", "high", "low"]]
             return curr_prices
 
+    @staticmethod
+    def update_prices(data: pd.DataFrame, new_values: pd.DataFrame):
+        if data is None:
+            data = fix_missing(new_values, ["close", "open", "high", "low"])
+            return data
+
+        last_dt = data.index[-1]
+        curr_prices = new_values[new_values.index > last_dt]
+        if len(curr_prices) > 0:
+            data = pd.concat([data, curr_prices], axis=0)
+        return fix_missing(data, ["close", "open", "high", "low"])
+
     def fetch_prices(self, session, numpoints=MIN_PRICE_HIST_PERIOD):
-        curr_prices = self.get_historical_data(session, numpoints)
+
+        # fetch current prices
+        curr_prices = self.get_historical_data(session, numpoints=numpoints)
         self.save_raw_data(curr_prices)
 
-        if self.prices is None:
-            self.prices = fix_missing(curr_prices, ["close", "open", "high", "low"])
-            return
+        self.prices = self.update_prices(self.prices, curr_prices)
 
-        last_dt = self.prices.index[-1]
-        curr_prices = curr_prices[curr_prices.index > last_dt]
-        if len(curr_prices) > 0:
-            self.prices = pd.concat([self.prices, curr_prices], axis=0)
-        self.prices = fix_missing(self.prices, ["close", "open", "high", "low"])
-        return
+        # fetch upper timeframe prices if its needed
+        if self.upper_timeframe_parameters is not None:
+            assert len(self.upper_timeframe_parameters) == 3, f"upper_timeframe_parameters must have 3 parameters"
+
+            u_resolution = int(self.upper_timeframe_parameters[0])
+            u_dft_period = int(self.upper_timeframe_parameters[1])
+            u_numpoints = u_resolution * u_dft_period + 1
+            curr_u_prices = self.get_historical_data(session, interval="1h", numpoints=u_numpoints)
+            self.u_prices = self.update_prices(self.u_prices, curr_u_prices)
+        return None
 
     def get_curr_price(self):
         return self.prices.iloc[-1]["close"]
@@ -111,40 +136,83 @@ class Pair:
             return True
         return False
 
-    def add_channels(self, df, period):
+    def add_channels(self, df: pd.DataFrame, period: int, highest_fib: float = None) -> pd.DataFrame:
         df = df.copy()
         df["hb"] = df["high"].rolling(window=period, min_periods=period).max()  # high border
         df["lb"] = df["low"].rolling(window=period, min_periods=period).min()  # low border
         df["dist"] = df["hb"] - df["lb"]  # range of the channel
         df["med"] = (df["lb"] + df["hb"]) / 2  # median of the channel
 
-        df["hf"] = df["hb"] - self.highest_fib * df["dist"]  # highest fib
+        # if channels are added not for u_prices
+        if highest_fib is None:
+            highest_fib = self.highest_fib
+
+        df["hf"] = df["hb"] - highest_fib * df["dist"]  # highest fib
         df["chf"] = df["hb"] - self.central_high_fib * df["dist"]  # central high fib
         df["clf"] = df["hb"] - self.central_low_fib * df["dist"]  # central low fib
         df["lf"] = df["hb"] - self.lowest_fib * df["dist"]  # lowest fib
         return df
 
-    def apply_resolution(self):
-        if self.resolution == 1:
-            return self.prices.copy()
+    @staticmethod
+    def apply_resolution(data: pd.DataFrame,  resolution: int = 1, interval: Literal["minute", "hour"] = "minute"):
+        if resolution == 1:
+            return data.copy()
 
-        res_df = pd.DataFrame(columns=self.prices.columns)
-        while self.prices.index[0].minute % self.resolution != 1:
-            self.prices = self.prices.drop(self.prices.index[0])
-        res_df["close"] = self.prices["close"].iloc[self.resolution - 1::self.resolution]
-        res_df["open"] = self.prices["open"].rolling(window=self.resolution, min_periods=self.resolution).apply(
+        res_df = pd.DataFrame(columns=data.columns)
+
+        # takes every resolution from the end of data
+        res_df["close"] = data["close"].iloc[-1::-resolution]
+        res_df["open"] = data["open"].rolling(window=resolution, min_periods=resolution).apply(
             lambda x: x[0])
-        res_df["low"] = self.prices["low"].rolling(window=self.resolution, min_periods=self.resolution).min()
-        res_df["high"] = self.prices["high"].rolling(window=self.resolution, min_periods=self.resolution).max()
-        return res_df
+        res_df["low"] = data["low"].rolling(window=resolution, min_periods=resolution).min()
+        res_df["high"] = data["high"].rolling(window=resolution, min_periods=resolution).max()
+        return res_df.sort_index()
 
-    def get_dft_signal(self, dft_period=24, verbose=False, save_history=True):
+    def get_upper_timeframe_criterion(self, verbose=True) -> bool:
+        criterion = True
+
+        if self.upper_timeframe_parameters is not None:
+            assert len(self.upper_timeframe_parameters) == 3, "upper_timeframe_parameters must have 3 parameters"
+
+            u_resolution, u_dft_period, u_hf = self.upper_timeframe_parameters
+
+            upper_dft_df = self.apply_resolution(self.u_prices, u_resolution, interval="hour")
+            upper_dft_df = self.add_channels(upper_dft_df, u_dft_period, highest_fib=u_hf)
+            criterion = (upper_dft_df["close"] > upper_dft_df["hf"]).values[-1]
+
+            # logging and verbose
+            if self.long_up_trend is None:
+                msg = f"in blue zone" if criterion else f"out of blue zone"
+                logging.info(f"{self.symbol}, {upper_dft_df.index[-1]}, {u_resolution}h-timeframe is {msg}")
+                if verbose:
+                    print(self.symbol, upper_dft_df.index[-1], f"{u_resolution}h-timeframe is {msg}")
+                self.long_up_trend = criterion
+
+            else:
+                u_evupin = criterion and not self.long_up_trend
+                u_evupout = not criterion and self.long_up_trend
+
+                if u_evupin:   # upper timeframe enters up trend
+                    logging.info(f"{self.symbol}, {upper_dft_df.index[-1]}, {u_resolution}h-timeframe enters blue zone")
+                    if verbose:
+                        print(self.symbol, upper_dft_df.index[-1], f"{u_resolution}h-timeframe enters blue zone")
+                    self.long_up_trend = True
+
+                if u_evupout:   # upper timeframe leaves up trend
+                    logging.info(f"{self.symbol}, {upper_dft_df.index[-1]}, {u_resolution}h-timeframe leaves blue zone")
+                    if verbose:
+                        print(self.symbol, upper_dft_df.index[-1], f"{u_resolution}h-timeframe leaves blue zone")
+                    self.long_up_trend = False
+
+        return criterion
+
+    def get_dft_signal(self, dft_period=24, verbose=False, save_history=True) -> Tuple[int, bool]:
         if self.prices is not None:
 
             # data must be without missing
             assert self.prices.isna().sum().sum() == 0, "There is missing in pair.prices"
 
-            dft_df = self.apply_resolution()
+            dft_df = self.apply_resolution(self.prices, self.resolution)
 
             # channel
             dft_df = self.add_channels(dft_df, dft_period)
@@ -161,6 +229,10 @@ class Pair:
             signal = 0
             # evupin = crossover(dft_df["close"], dft_df["hf"])  # market enters up trend
             evupout = self.crossunder(dft_df["close"], dft_df["hf"])  # market leaves up trend
+
+            # if use information from upper timeframe (it has to be in blue zone - up trend)
+            upper_timeframe_criterion = self.get_upper_timeframe_criterion(verbose=verbose)
+
             if evupout:
                 signal = -1
             dft_df["lftrue"] = dft_df["close"] < dft_df["lf"]
@@ -169,7 +241,8 @@ class Pair:
             if self.idx_down_periods != len(self.n_down_periods) - 1 and \
                     all(dft_df["lftrue"].iloc[-n_down_periods:]) and \
                     not dft_df["lftrue"].iloc[-n_down_periods - 1] and \
-                    (self.last_sell is None or self.last_sell < dft_df.index[-n_down_periods]):
+                    (self.last_sell is None or self.last_sell < dft_df.index[-n_down_periods]) and \
+                    upper_timeframe_criterion:
                 # последние n_down_period были оранжевыми и с последней продажи прошло более n_down_periods периодов
 
                 signal = 1
@@ -185,8 +258,22 @@ class Pair:
 
             if save_history:
                 dft_df.to_csv(f"History/dft_{datetime.datetime.now().date()}_{self.resolution}min.csv")
-            return signal
+            return signal, upper_timeframe_criterion
 
     def cross_stop_loss(self, session, stop_price):
         self.fetch_prices(session)
         return self.prices["close"].iloc[-1] < stop_price
+
+
+def parse_du(du_str: str, sep=";") -> Tuple[int, int, float]:
+    du_str = du_str.strip()
+    du = None if du_str == "None" else [el.strip() for el in du_str[1:-1].split(sep)]
+
+    if du is None:
+        return du
+
+    du[0] = int(du[0])
+    du[1] = int(du[1])
+    du[2] = "0." + du[2] if not du[2].startswith("0.") else du[2]
+    du[2] = float(du[2])
+    return du

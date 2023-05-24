@@ -2,7 +2,7 @@ import datetime
 
 import pandas as pd
 import pytest
-from Simulaton.simulate import was_stoploss, simulation_step, update_pair, update_balance, run_simulate
+from simulation.simulate import was_stoploss, simulation_step, update_pair, update_balance, run_simulate
 from pair import Pair
 from unittest import mock
 import numpy as np
@@ -20,7 +20,7 @@ def make_simulated_pair():
 
 
 def get_test_data(symbol: str) -> pd.DataFrame:
-    data = pd.read_csv("../Tests/SP500_yahoo_data.csv", index_col=0)
+    data = pd.read_csv("SP500_yahoo_data.csv", index_col=0)
     data.index = pd.to_datetime(data.index).tz_localize(None)
     return data
 

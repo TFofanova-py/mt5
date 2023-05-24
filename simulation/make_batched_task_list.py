@@ -1,6 +1,7 @@
 import json
 import argparse
 from itertools import product
+from pair.pair import parse_du
 
 
 if __name__ == "__main__":
@@ -18,14 +19,17 @@ if __name__ == "__main__":
 
     with open(args.configurations) as f:
         lines = f.readlines()
-        columns = lines[0].split()
+        # columns = lines[0].split()
 
         for line in lines[1:]:
-            r, st, d, hf, lf, dp = line.split(",")
-            if all((x for x in line.split(","))):
-                configs.append({"r": int(r), "st": round(int(st) * 1e-3, 3), "d": int(d),
-                                "hf": round(int(hf) * 1e-3, 3), "lf": round(int(lf) * 1e-3, 3),
-                                "dp": "[" + dp[:-1] + "]"})
+            params_list = line.split(",")
+            assert len(params_list) == 8, "number of parameters must be equal 8"
+            r, st, d, hf, lf, dp, m, du = params_list
+
+            configs.append({"r": int(r), "st": round(int(st) * 1e-3, 3), "d": int(d),
+                            "hf": round(int(hf) * 1e-3, 3), "lf": round(int(lf) * 1e-3, 3),
+                            "dp": "[" + dp + "]", "m": m == "True",
+                            "du": parse_du(du)})
 
     # make symbols list
     with open(args.symbols) as f:

@@ -13,24 +13,28 @@ def session():
     mt5.initialize(login=Config.login, password=Config.password, server=Config.server, path=Config.path)
     yield {"broker": mt5,
            "pairs": {"first_pair_params": {"symbol": "[SP500]",
+                                           "data_source": "mt5",
                                            "resolution": mt5.TIMEFRAME_M1,
                                            "deal_size": 1.0,
                                            "stop_coefficient": 0.997,
                                            "limit": None,
                                            "dft_period": 19},
                      "second_pair_params": {"symbol": "USDCHF",
+                                            "data_source": "mt5",
                                             "resolution": mt5.TIMEFRAME_M3,
                                             "deal_size": 0.5,
                                             "stop_coefficient": 0.998,
                                             "limit": None,
                                             "dft_period": 34},
                      "pair_with_wrong_deal_size_params": {"symbol": "[SP500]",
+                                                          "data_source": "mt5",
                                                           "resolution": mt5.TIMEFRAME_M1,
                                                           "deal_size": 1000.0,
                                                           "stop_coefficient": 0.994,
                                                           "limit": None,
                                                           "dft_period": 19},
                      "pair_with_wrong_stop_params": {"symbol": "BTCUSD",
+                                                     "data_source": "mt5",
                                                      "resolution": mt5.TIMEFRAME_M3,
                                                      "deal_size": 0.5,
                                                      "stop_coefficient": 0.999,
@@ -46,12 +50,16 @@ def make_pairs(session):
     for pair_key in session["pairs"]:
         pair_params = session["pairs"][pair_key]
         pair_key_short = pair_key[:-7]
-        pairs_dict[pair_key_short] = Pair(symbol=pair_params["symbol"],
-                                          resolution=pair_params["resolution"],
-                                          deal_size=pair_params["deal_size"],
-                                          stop_coef=pair_params["stop_coefficient"],
-                                          limit_coef=pair_params["limit"],
-                                          dft_period=pair_params["dft_period"])
+        pairs_dict[pair_key_short] = Pair(symbol=pair_params.get("symbol"),
+                                          yahoo_symbol=pair_params.get("yahoo_symbol"),
+                                          resolution=pair_params.get("resolution"),
+                                          data_source=pair_params.get("data_source"),
+                                          deal_size=pair_params.get("deal_size"),
+                                          stop_coef=pair_params.get("stop_coefficient"),
+                                          limit_coef=pair_params.get("limit"),
+                                          dft_period=pair_params.get("dft_period"),
+                                          upper_timeframe_parameters=pair_params.get("upper_timeframe_parameters")
+                                          )
 
     yield pairs_dict
 
@@ -164,6 +172,7 @@ def test_fetch_prices(session, make_pairs):
     pair.fetch_prices(broker, numpoints=10)
 
     assert pair.prices.isna().sum().sum() == 0
+
 
 # #  python -m pytest test_open_close.py
 # # --trace - option for debug
