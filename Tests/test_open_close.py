@@ -1,16 +1,17 @@
-import pandas as pd
+import json
 import numpy as np
 import pytest
 import MetaTrader5 as mt5
-from config_mt5 import Config
-from pair import Pair
+from pair.pair import Pair
 from main import create_position, close_opened_position
 from time import sleep
 
 
 @pytest.fixture(scope="module")
 def session():
-    mt5.initialize(login=Config.login, password=Config.password, server=Config.server, path=Config.path)
+    mt5_config = json.load(open("mt5_config.json"))
+    mt5.initialize(login=mt5_config["login"], password=mt5_config["password"],
+                   server=mt5_config["server"], path=mt5_config["path"])
     yield {"broker": mt5,
            "pairs": {"first_pair_params": {"symbol": "[SP500]",
                                            "data_source": "mt5",
@@ -22,7 +23,7 @@ def session():
                      "second_pair_params": {"symbol": "USDCHF",
                                             "data_source": "mt5",
                                             "resolution": mt5.TIMEFRAME_M3,
-                                            "deal_size": 0.5,
+                                            "deal_size": 0.05,
                                             "stop_coefficient": 0.998,
                                             "limit": None,
                                             "dft_period": 34},
@@ -50,16 +51,7 @@ def make_pairs(session):
     for pair_key in session["pairs"]:
         pair_params = session["pairs"][pair_key]
         pair_key_short = pair_key[:-7]
-        pairs_dict[pair_key_short] = Pair(symbol=pair_params.get("symbol"),
-                                          yahoo_symbol=pair_params.get("yahoo_symbol"),
-                                          resolution=pair_params.get("resolution"),
-                                          data_source=pair_params.get("data_source"),
-                                          deal_size=pair_params.get("deal_size"),
-                                          stop_coef=pair_params.get("stop_coefficient"),
-                                          limit_coef=pair_params.get("limit"),
-                                          dft_period=pair_params.get("dft_period"),
-                                          upper_timeframe_parameters=pair_params.get("upper_timeframe_parameters")
-                                          )
+        pairs_dict[pair_key_short] = Pair(pair_params)
 
     yield pairs_dict
 
@@ -99,29 +91,45 @@ def test_check_order(session, make_pairs):
 
 def test_create_position(session, make_pairs):
     broker = session["broker"]
-    pair = make_pairs["first_pair"]
-    pair.fetch_prices(broker, numpoints=10)
 
-    response = create_position(broker, pair)
-    assert response is not None
+    # buy all pairs
+    for pair in [make_pairs["first_pair"], make_pairs["second_pair"]]:
 
-    try:
-        assert response.order != 0
-        assert response.volume == pair.deal_size
-    except Exception as e:
-        print(e)
-    sleep(20)
+        pair.fetch_prices(broker, numpoints=10)
+
+        response = create_position(broker, pair)
+        assert response is not None
+
+        try:
+            assert response.order != 0
+            assert response.volume == pair.deal_size
+        except Exception as e:
+            print(e)
+        sleep(20)
 
 
 def test_close_opened_position(session, make_pairs):
     broker = session["broker"]
+
+    # sell the first pair with identifier
     pair = make_pairs["first_pair"]
     open_pos = broker.positions_total()
     assert open_pos > 0
     if pair.prices is None:
         pair.fetch_prices(broker, numpoints=10)
+    response = close_opened_position(broker, pair,
+                                     identifiers=[broker.positions_get(symbol=pair.symbol)[0].identifier])[0]
+    assert response is not None
+    assert response.volume == pair.deal_size
 
-    response = close_opened_position(broker, pair)
+    # sell the second pair without any identifier
+    pair = make_pairs["second_pair"]
+    open_pos = broker.positions_total()
+    assert open_pos > 0
+    if pair.prices is None:
+        pair.fetch_prices(broker, numpoints=10)
+
+    response = close_opened_position(broker, pair)[0]
     assert response is not None
     assert response.volume == pair.deal_size
 
@@ -133,11 +141,11 @@ def test_close_first_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    response = close_opened_position(broker, first_pair)
+    response = close_opened_position(broker, first_pair)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)
 
-    response = close_opened_position(broker, second_pair)
+    response = close_opened_position(broker, second_pair)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
 
@@ -149,11 +157,11 @@ def test_close_second_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    response = close_opened_position(broker, second_pair)
+    response = close_opened_position(broker, second_pair)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
 
-    response = close_opened_position(broker, first_pair)
+    response = close_opened_position(broker, first_pair)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)
 
@@ -174,7 +182,7 @@ def test_fetch_prices(session, make_pairs):
     assert pair.prices.isna().sum().sum() == 0
 
 
-# #  python -m pytest test_open_close.py
+# #  python -m pytest .\Tests\test_open_close.py
 # # --trace - option for debug
 # #  s | n - next, s - step into
 
