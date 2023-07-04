@@ -111,19 +111,37 @@ class WrappedPair:
     @staticmethod
     def get_rsi_signal(prices: pd.DataFrame,
                        period: int = 14, upper_threshold: int = 70, lower_threshold: int = 30) -> Tuple[int, dict]:
-        rsi_ser = rsi(prices["close"], period=period)
-        signal = 1 if rsi_ser[-1] < lower_threshold else (-1 if rsi_ser[-1] > upper_threshold else 0)
-        info = {"time": rsi_ser.index[-1], "rsi": rsi_ser[-1]}
+        rsi_df = rsi(prices, period=period)
+        signal = 1 if rsi_df.iloc[-1]["rsi"] < lower_threshold else (
+            -1 if rsi_df.iloc[-1]["rsi"] > upper_threshold else 0)
+        info = {"time": rsi_df.index[-1], "rsi": rsi_df.iloc[-1]["rsi"]}
         return signal, info
 
     @staticmethod
-    def get_bollinger_bands_signal(prices: pd.DataFrame, period: int = 200, std: float = 2.) -> Tuple[int, dict]:
-        bb_df = bollinger_bands(prices["close"], period=period, std=std)
-        signal = 1 if crossover(prices["close"], bb_df["lower"]) \
-            else (-1 if crossunder(prices["close"], bb_df["upper"]) else 0)
+    def get_bollinger_bands_signal(prices: pd.DataFrame, period: int = 200, mult: int = 2) -> Tuple[int, dict]:
+        bb_df = bollinger_bands(prices, period=period, mult=mult)
+        signal = 1 if crossover(prices["close"], bb_df["lower_" + str(mult)]) \
+            else (-1 if crossunder(prices["close"], bb_df["upper_" + str(mult)]) else 0)
         info = {"time": bb_df.index[-1],
-                "bollinger_bands_upper": bb_df.iloc[-1]["upper"],
-                "bollinger_bands_lower": bb_df.iloc[-1]["lower"]}
+                "bollinger_bands_upper": bb_df.iloc[-1]["upper_" + str(mult)],
+                "bollinger_bands_lower": bb_df.iloc[-1]["lower_" + str(mult)]}
+        return signal, info
+
+    @staticmethod
+    def get_bb_rsi_signal(prices: pd.DataFrame, bb_period: int = 200, rsi_period: int = 8,
+                          rsi_upper_threshold: int = 70, rsi_lower_threshold: int = 30) -> Tuple[int, dict]:
+        df = bollinger_bands(prices, period=bb_period, mult=2)
+        df = rsi(df, period=rsi_period, upper_threshold=rsi_upper_threshold, lower_threshold=rsi_lower_threshold)
+        signal = 1 if (crossover(df["rsi"], df["rsi_lower_threshold"]) and (crossover(df["close"], df["lower_2"])))\
+            else (-1 if (crossunder(df["rsi"], df["rsi_upper_threshold"]) and crossunder(df["close"], df["upper_2"]))\
+                  else 0)
+        if signal != 0:
+            pass
+
+        info = {"time": df.index[-1],
+                "rsi": df.iloc[-1]["rsi"],
+                "bollinger_bands_upper": df.iloc[-1]["upper_2"],
+                "bollinger_bands_lower": df.iloc[-1]["lower_2"]}
         return signal, info
 
     @staticmethod
@@ -170,11 +188,17 @@ class WrappedPair:
                     msg = f"{self.symbol}, {info['time']}, {wrap['timeframe']}-RSI signal is {signal}, RSI is {info['rsi']}"
 
                 elif alg == "bollinger_bands":
-                    signal, info = self.get_bollinger_bands_signal(prices, period=params["period"], std=params["std"])
+                    signal, info = self.get_bollinger_bands_signal(prices, period=params["period"], mult=2)
 
                     msg = f"{self.symbol}, {info['time']}, {wrap['timeframe']}-bollinger bands signal is {signal}, " \
                           f"bollinger_bands_upper is {info['bollinger_bands_upper']}, " \
                           f"bollinger_bands_lower is {info['bollinger_bands_lower']}"
+
+                elif alg == "bb_rsi":
+                    signal, info = self.get_bb_rsi_signal(prices, bb_period=params["bb_period"],
+                                                          rsi_period=params["rsi_period"])
+
+                    msg = f"{self.symbol}, {info['time']}, {wrap['timeframe']}-BB+RSI signal is {signal}, RSI is {info['rsi']}"
 
                 elif alg == "support_resistance":
                     signal, info = self.get_support_resistance_signal(prices, left_bars=params["left_bars"],
@@ -253,4 +277,3 @@ class WrappedPair:
             responses.append(self.broker.order_send(request))
 
         return responses
-
