@@ -1,14 +1,13 @@
 import os
-
 import MetaTrader5 as mt5
 import numpy as np
-from config_mt5 import Config
 from datetime import datetime, timedelta, timezone
 from time import sleep
 import logging
-from pair.pair import Pair, parse_du
+from pair.pair import Pair
 from pair.constants import N_DOWN_PERIODS
 import argparse
+import json
 
 
 def create_position(broker, pair):
@@ -108,7 +107,7 @@ def print_opened_pos(broker, pair):
         logging.info(f"You have {len(opened_pos)} opened positions in {pair.symbol}")
 
 
-def trade_const_instrument(broker, pair, tzone):
+def trade_const_instrument(broker, pair):
     print_opened_pos(broker, pair)
     trade_result = {"numpoints": pair.resolution * (pair.dft_period + 1), "position": 0}
 
@@ -122,64 +121,64 @@ def trade_const_instrument(broker, pair, tzone):
         sleep(pair.resolution * 60)
 
 
+def wait_for_next_hour(verbose=False) -> None:
+    now = datetime.now()
+    seconds_to_next_hour = 60 * 60 - now.minute * 60 - now.second + 1
+
+    msg = f"waiting for {seconds_to_next_hour} seconds for the next hour"
+    logging.info(msg)
+    if verbose:
+        print(msg)
+
+    sleep(seconds_to_next_hour)
+
+
+def check_strategy_config(conf: dict) -> bool:
+    # check if all required parameters are in config
+
+    for req_param in ["symbol"]:
+        if req_param not in conf:
+            msg = f"Parameter {req_param} is required in config.json"
+            logging.error(msg)
+            print(msg)
+            return False
+    return True
+
+
 if __name__ == '__main__':
     tz = timezone(timedelta(hours=1))
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config_file")
+    parser.add_argument("--immediately", "-i", action="store_true")
+    args = parser.parse_args()
+
+    config = json.load(open(args.config_file))
 
     if not os.path.exists("./History/logs/"):
         os.makedirs("./History/logs/")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--instrument", "-i", default="[SP500]", help="symbol of the instrument MT5")
-    parser.add_argument("--yahoo_symbol", "-ys", default="^GSPC", help="symbol of the instrument on finance.yahoo.com")
-    parser.add_argument("--resolution", "-r", default=3, type=int, help="time step for MT5 in minutes")
-    parser.add_argument("--data_source", "-ds", default="yahoo", choices=["mt5", "yahoo"], help="source of historical data")
-    parser.add_argument("--deal_size", "-s", default=1.0, type=float, help="deal size for opening position")
-    parser.add_argument("--stop_coefficient", "-st", type=float, default=0.998,
-                        help="stop level coefficient for opening position")
-    parser.add_argument("--limit", "-l", default=None, type=float, help="take profit for opening position")
-    parser.add_argument("--dft_period", "-d", type=int, default=39, help="period for make dtf signal")
-    parser.add_argument("--highest_fib", "-hf", type=float, default=0.220, help="hf level")
-    parser.add_argument("--lowest_fib", "-lf", type=float, default=0.800, help="lf level")
-    parser.add_argument("--server", "-srv", type=str, default=Config.server, help="MT5 server")
-    parser.add_argument("--login", "-lgn", type=int, default=Config.login, help="MT5 login")
-    parser.add_argument("--password", "-psw", type=str, default=Config.password, help="MT5 password")
-    parser.add_argument("--path", "-pth", type=str, default=Config.path, help="MT5 path")
-    parser.add_argument("--down_periods", "-dp", type=str, default="[3, 4]", help="down periods for buy signal")
-    parser.add_argument("--multibuying_avail", "-m", default=False, action="store_true",
-                        help="buying is available even if there is an opened position")
-    parser.add_argument("--upper_timeframe_parameters", "-du", type=str, default=None,
-                        help="upper timeframe (hours) for buying in blue zone")
-    args = parser.parse_args()
-
     logging.basicConfig(level=logging.INFO,
                         format='%(message)s',
-                        filename=f"./History/logs/trading_log_{args.login}_{datetime.now(tz).date()}.txt",
+                        filename=f"./History/logs/trading_log_{config['login']}_{datetime.now(tz).date()}.txt",
                         filemode="a")
 
     try:
-        mt5.initialize(login=args.login, password=args.password, server=args.server, path=args.path)
+        mt5.initialize(login=config['login'], password=config['password'],
+                       server=config['server'], path=config['path'])
 
     except Exception as e:
         logging.info(f"Create session error: {e}")
     else:
-        if args.instrument is not None:
-            logging.info(f"Using instrument from {args.instrument}")
-            pair_to_trade = Pair(symbol=args.instrument,
-                                 yahoo_symbol=args.yahoo_symbol,
-                                 resolution=args.resolution,
-                                 data_source=args.data_source,
-                                 deal_size=args.deal_size,
-                                 stop_coef=args.stop_coefficient,
-                                 limit_coef=args.limit,
-                                 dft_period=args.dft_period,
-                                 highest_fib=args.highest_fib,
-                                 lowest_fib=args.lowest_fib,
-                                 n_down_periods=list(map(int, args.down_periods[1:-1].split(','))) + [np.inf],
-                                 is_multibuying_available=args.multibuying_avail,
-                                 upper_timeframe_parameters=parse_du(args.upper_timeframe_parameters, sep=","))
+        if check_strategy_config(config):
+            logging.info(f"Using instrument {config.get('symbol')}")
+
+            pair_to_trade = Pair(config)
             if pair_to_trade is not None:
-                trade_const_instrument(mt5, pair_to_trade, tz)
-        else:
-            logging.getLogger(__name__).info(f"Choosing pair by bot is not available now")
+
+                if not args.immediately:
+                    wait_for_next_hour(verbose=True)
+
+                trade_const_instrument(mt5, pair_to_trade)
         mt5.shutdown()
 

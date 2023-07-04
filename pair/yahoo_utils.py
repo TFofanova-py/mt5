@@ -26,7 +26,7 @@ def get_yahoo_data(symbol: str, interval="1m") -> Union[pd.DataFrame, None]:
             history = pd.concat([history_early, history], axis=0)
 
         history.drop(["Volume", "Dividends", "Stock Splits"], axis=1, inplace=True)
-        history.set_axis(["open", "high", "low", "close"], axis=1, inplace=True)
+        history = history.set_axis(["open", "high", "low", "close"], axis=1)
 
         history.sort_index(axis=0, inplace=True)
 

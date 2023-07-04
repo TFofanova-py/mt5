@@ -1,6 +1,6 @@
 import datetime
 import logging
-
+import numpy as np
 import pytz
 import os.path
 
@@ -11,46 +11,69 @@ from .constants import NUM_ATTEMPTS_FETCH_PRICES, \
     N_DOWN_PERIODS, MIN_PRICE_HIST_PERIOD, MT5_TIMEFRAME
 from .check_data import fix_missing
 from .yahoo_utils import get_yahoo_data
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Union
 
 
 class Pair:
-    def __init__(self, symbol=None, yahoo_symbol=None,
-                 resolution=3, data_source="mt5", deal_size=1,
-                 stop_coef=0.9995, limit_coef=None, dft_period=24,
-                 highest_fib=HIGHEST_FIB, central_high_fib=CENTRAL_HIGH_FIB,
-                 lowest_fib=LOWEST_FIB, central_low_fib=CENTRAL_LOW_FIB,
-                 n_down_periods=N_DOWN_PERIODS,
-                 is_multibuying_available=False,
-                 upper_timeframe_parameters=None):
+    def __init__(self, kwargs):
 
-        self.symbol = symbol
-        self.yahoo_symbol = yahoo_symbol
-        self.resolution = resolution
-        self.data_source = data_source
-        if self.data_source == "yahoo":
-            assert self.yahoo_symbol is not None, "yahoo_symbol mustn't be None if data_source is 'yahoo'"
-        self.prices = None
-        self.data_file = f"./History/{self.symbol}_rawdata.csv"
-        self.deal_size = deal_size
-        self.stop_coefficient = stop_coef
-        self.limit_coefficient = limit_coef
+        try:
+            self.symbol: str = kwargs["symbol"]  # symbol of the instrument MT5
+            self.yahoo_symbol: str = kwargs.get("yahoo_symbol")  # symbol of the instrument on finance.yahoo.com
+            self.resolution: int = kwargs["resolution"] if "resolution" in kwargs else 3  # time step for MT5 in minutes
 
-        mt5_symbol_info = mt5.symbol_info(symbol)
-        self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
+            # source of historical data
+            self.data_source: Literal["mt5", "yahoo"] = kwargs["data_source"] if "data_source" in kwargs else "yahoo"
+            if self.data_source == "yahoo":
+                assert self.yahoo_symbol is not None, "yahoo_symbol mustn't be None if data_source is 'yahoo'"
+            self.prices = None
+            self.data_file: str = f"./History/{self.symbol}_rawdata.csv"
 
-        self.dft_period = dft_period
-        self.idx_down_periods = 0
-        self.last_sell = None
-        self.highest_fib = highest_fib
-        self.central_high_fib = central_high_fib
-        self.lowest_fib = lowest_fib
-        self.central_low_fib = central_low_fib
-        self.n_down_periods = n_down_periods
-        self.is_multibuying_available = is_multibuying_available
-        self.upper_timeframe_parameters = upper_timeframe_parameters
-        self.u_prices = None
-        self.long_up_trend = None
+            self.deal_size: float = kwargs[
+                "deal_size"] if "deal_size" in kwargs else 1.0  # deal size for opening position
+
+            # stop level coefficient for opening position
+            self.stop_coefficient: Union[float, Literal["hf"]] = kwargs[
+                "stop_coefficient"] if "stop_coefficient" in kwargs else 0.9995
+
+            self.limit_coefficient: float = kwargs.get("limit_coefficient")  # take profit for opening position
+
+            mt5_symbol_info = mt5.symbol_info(self.symbol)
+            self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
+
+            self.dft_period: int = kwargs[
+                "dft_period"] if "dft_period" in kwargs else 24  # period for making dtf signal
+            self.idx_down_periods: int = 0
+            self.last_sell: datetime = None
+            self.highest_fib: float = kwargs["highest_fib"] if "highest_fib" in kwargs else HIGHEST_FIB  # hf level
+            self.central_high_fib: float = kwargs[
+                "central_high_fib"] if "central_high_fib" in kwargs else CENTRAL_HIGH_FIB
+            self.lowest_fib: float = kwargs["lowest_fib"] if "lowest_fib" in kwargs else LOWEST_FIB  # lf level
+            self.central_low_fib: float = kwargs["central_low_fib"] if "central_low_fib" in kwargs else CENTRAL_LOW_FIB
+
+            # down periods for buy signal
+            self.n_down_periods: tuple = tuple(
+                kwargs["down_periods"] + [np.inf]) if "down_periods" in kwargs else N_DOWN_PERIODS
+
+            # buying is available even if there is an opened position
+            self.is_multibuying_available: bool = kwargs[
+                "multibuying_available"] if "multibuying_available" in kwargs else False
+
+            # upper timeframe (hours) for buying in blue zone
+            self.upper_timeframe_parameters: Tuple[int, int, float] = kwargs.get("upper_timeframe_parameters")
+            assert self.upper_timeframe_parameters is None or 0 < self.upper_timeframe_parameters[2] < 1, \
+                "The third upper_timeframe_parameter must be in (0, 1)"
+            self.u_prices = None
+            self.long_up_trend = None
+
+            self.unclear_trend_periods: int = kwargs[
+                "unclear_trend_periods"] if "unclear_trend_periods" in kwargs else 30
+            self.down_trend_periods: int = kwargs["down_trend_periods"] if "down_trend_periods" in kwargs else 5
+            self.positions: list = []
+
+        except TypeError as e:
+            logging.error(f"Error: {e}")
+            print(f"Error: {e}")
 
     def save_raw_data(self, data):
         new_data = data
@@ -263,17 +286,3 @@ class Pair:
     def cross_stop_loss(self, session, stop_price):
         self.fetch_prices(session)
         return self.prices["close"].iloc[-1] < stop_price
-
-
-def parse_du(du_str: str, sep=";") -> Tuple[int, int, float]:
-    du_str = du_str.strip()
-    du = None if du_str == "None" else [el.strip() for el in du_str[1:-1].split(sep)]
-
-    if du is None:
-        return du
-
-    du[0] = int(du[0])
-    du[1] = int(du[1])
-    du[2] = "0." + du[2] if not du[2].startswith("0.") else du[2]
-    du[2] = float(du[2])
-    return du

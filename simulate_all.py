@@ -17,9 +17,9 @@ def run_batch_simulate(tasks_file: str, out_file: str, batch_id: int) -> None:
                                               "dft_period": params["dft_period"],
                                               "stop_coef": params["stop_coefficient"],
                                               "hf": params["highest_fib"], "lf": params["lowest_fib"],
-                                              "down_periods": params["down_periods"],
+                                              "down_periods": str(params["down_periods"]),
                                              "is_multibuying_available": params["is_multibuying_available"],
-                                              "upper_timeframe_parameters": params["upper_timeframe_parameters"],
+                                              "upper_timeframe_parameters": str(params["upper_timeframe_parameters"]),
                                               "total_yield": total_yield},
                                              index=[0])])
             df[["timestamp", "symbol", "resolution", "dft_period", "stop_coef",
@@ -49,12 +49,13 @@ def run_batch_simulate(tasks_file: str, out_file: str, batch_id: int) -> None:
         pool = mp.Pool(n_cpu)
 
         for task in tasks:
-            pool.apply_async(run_simulate, kwds={"symbol": task["symbol"], "resolution": task["r"],
+            pool.apply_async(run_simulate, kwds={"symbol": task["symbol"],
+                                                 "yahoo_symbol": task["symbol"], "resolution": task["r"],
                                                  "stop_coefficient": task["st"],
                                                  "dft_period": task["d"], "down_periods": task["dp"],
                                                  "highest_fib": task["hf"], "lowest_fib": task["lf"],
                                                  "is_multibuying_available": False,
-                                                 "upper_timeframe_parameters": task["du"]
+                                                 "upper_timeframe_parameters": task["upper_timeframe_parameters"]
                                                  },
                              callback=concat_df, error_callback=error_callback)
 
