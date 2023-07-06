@@ -159,21 +159,24 @@ class Pair:
             return True
         return False
 
-    def add_channels(self, df: pd.DataFrame, period: int, highest_fib: float = None) -> pd.DataFrame:
+    def add_levels(self, df: pd.DataFrame, period: int = None, highest_fib: float = None) -> pd.DataFrame:
+
         df = df.copy()
+
+        # for upper_dft_df period and highest_fib aren't the attributes of self
+        period = self.dft_period if period is None else period
+        highest_fib = self.highest_fib if highest_fib is None else highest_fib
+
         df["hb"] = df["high"].rolling(window=period, min_periods=period).max()  # high border
         df["lb"] = df["low"].rolling(window=period, min_periods=period).min()  # low border
         df["dist"] = df["hb"] - df["lb"]  # range of the channel
         df["med"] = (df["lb"] + df["hb"]) / 2  # median of the channel
 
-        # if channels are added not for u_prices
-        if highest_fib is None:
-            highest_fib = self.highest_fib
-
         df["hf"] = df["hb"] - highest_fib * df["dist"]  # highest fib
         df["chf"] = df["hb"] - self.central_high_fib * df["dist"]  # central high fib
         df["clf"] = df["hb"] - self.central_low_fib * df["dist"]  # central low fib
         df["lf"] = df["hb"] - self.lowest_fib * df["dist"]  # lowest fib
+
         return df
 
     @staticmethod
@@ -191,17 +194,20 @@ class Pair:
         res_df["high"] = data["high"].rolling(window=resolution, min_periods=resolution).max()
         return res_df.sort_index()
 
-    def get_upper_timeframe_criterion(self, verbose=True) -> bool:
+    def get_blue_dft_signal(self, verbose=True) -> Tuple[int, dict]:
         criterion = True
+        result = {}
 
         if self.upper_timeframe_parameters is not None:
-            assert len(self.upper_timeframe_parameters) == 3, "upper_timeframe_parameters must have 3 parameters"
 
             u_resolution, u_dft_period, u_hf = self.upper_timeframe_parameters
 
             upper_dft_df = self.apply_resolution(self.u_prices, u_resolution, interval="hour")
-            upper_dft_df = self.add_channels(upper_dft_df, u_dft_period, highest_fib=u_hf)
+            upper_dft_df = self.add_levels(upper_dft_df, u_dft_period, highest_fib=u_hf)
             criterion = (upper_dft_df["close"] > upper_dft_df["hf"]).values[-1]
+
+            if criterion and self.stop_coefficient == "hf":
+                result["upper_hf"] = upper_dft_df.iloc[-1]["hf"]
 
             # logging and verbose
             if self.long_up_trend is None:
@@ -215,19 +221,21 @@ class Pair:
                 u_evupin = criterion and not self.long_up_trend
                 u_evupout = not criterion and self.long_up_trend
 
-                if u_evupin:   # upper timeframe enters up trend
+                if u_evupin:  # upper timeframe enters up trend
                     logging.info(f"{self.symbol}, {upper_dft_df.index[-1]}, {u_resolution}h-timeframe enters blue zone")
                     if verbose:
                         print(self.symbol, upper_dft_df.index[-1], f"{u_resolution}h-timeframe enters blue zone")
                     self.long_up_trend = True
 
-                if u_evupout:   # upper timeframe leaves up trend
+                if u_evupout:  # upper timeframe leaves up trend
                     logging.info(f"{self.symbol}, {upper_dft_df.index[-1]}, {u_resolution}h-timeframe leaves blue zone")
                     if verbose:
                         print(self.symbol, upper_dft_df.index[-1], f"{u_resolution}h-timeframe leaves blue zone")
                     self.long_up_trend = False
 
-        return criterion
+        result["upper_timeframe_criterion"] = criterion
+
+        return int(criterion), result
 
     def get_dft_signal(self, dft_period=24, verbose=False, save_history=True) -> Tuple[int, bool]:
         if self.prices is not None:
@@ -238,7 +246,7 @@ class Pair:
             dft_df = self.apply_resolution(self.prices, self.resolution)
 
             # channel
-            dft_df = self.add_channels(dft_df, dft_period)
+            dft_df = self.add_levels(dft_df)
 
             # entry markers
             dft_df["close_1"] = dft_df["close"].shift(1)
@@ -254,7 +262,7 @@ class Pair:
             evupout = self.crossunder(dft_df["close"], dft_df["hf"])  # market leaves up trend
 
             # if use information from upper timeframe (it has to be in blue zone - up trend)
-            upper_timeframe_criterion = self.get_upper_timeframe_criterion(verbose=verbose)
+            blue_dft_signal, info = self.get_blue_dft_signal(verbose=verbose)
 
             if evupout:
                 signal = -1
@@ -265,7 +273,7 @@ class Pair:
                     all(dft_df["lftrue"].iloc[-n_down_periods:]) and \
                     not dft_df["lftrue"].iloc[-n_down_periods - 1] and \
                     (self.last_sell is None or self.last_sell < dft_df.index[-n_down_periods]) and \
-                    upper_timeframe_criterion:
+                    blue_dft_signal:
                 # последние n_down_period были оранжевыми и с последней продажи прошло более n_down_periods периодов
 
                 signal = 1
@@ -281,7 +289,7 @@ class Pair:
 
             if save_history:
                 dft_df.to_csv(f"History/dft_{datetime.datetime.now().date()}_{self.resolution}min.csv")
-            return signal, upper_timeframe_criterion
+            return signal, info.get("upper_timeframe_criterion")
 
     def cross_stop_loss(self, session, stop_price):
         self.fetch_prices(session)
