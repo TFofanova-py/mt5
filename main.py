@@ -5,20 +5,24 @@ from datetime import datetime, timedelta, timezone
 from time import sleep
 import logging
 from pair.pair import Pair
-from pair.constants import N_DOWN_PERIODS
+from typing import List
 import argparse
 import json
 
 
-def create_position(broker, pair):
+def create_position(broker, pair: Pair, sl: float = None):
     curr_price = pair.get_curr_price()
+
+    if sl is None:
+        sl = round(curr_price * pair.stop_coefficient, abs(int(np.log10(pair.trade_tick_size))))
+
     request = {
-        "action": broker.TRADE_ACTION_DEAL,
+        "action": broker.TRADE_ACTION_DEAL,  # for non market order TRADE_ACTION_PENDING
         "symbol": pair.symbol,
         "volume": pair.deal_size,
         "type": broker.ORDER_TYPE_BUY,
         "price": curr_price,
-        "sl": round(curr_price * pair.stop_coefficient, abs(int(np.log10(pair.trade_tick_size)))),
+        "sl": sl,
         "comment": "python script open",
         "type_time": broker.ORDER_TIME_GTC,
         "type_filling": broker.ORDER_FILLING_IOC
@@ -29,32 +33,40 @@ def create_position(broker, pair):
 
     # if the order is incorrect
     if check_result.retcode != 0:
-        # error codes here: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
+        # error codes are here: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
         print(check_result.retcode, check_result.comment)
         return None
 
     return broker.order_send(request)
 
 
-def close_opened_position(broker, pair):
-    position = broker.positions_get(symbol=pair.symbol)[-1]
+def close_opened_position(broker, pair, identifiers: List[int] = None) -> list:
+    if identifiers is None:
+        identifiers = [pos.identifier for pos in broker.positions_get(symbol=pair.symbol)]
+
     curr_price = pair.get_curr_price()
 
-    request = {
-        "action": broker.TRADE_ACTION_DEAL,
-        "symbol": pair.symbol,
-        "volume": pair.deal_size,
-        "type": broker.ORDER_TYPE_SELL,
-        "position": position.identifier,
-        "price": curr_price,
-        "comment": "python script close",
-        "type_time": broker.ORDER_TIME_GTC,
-        "type_filling": broker.ORDER_FILLING_IOC
-    }
-    return broker.order_send(request)
+    responses = []
+    for position in identifiers:
+        request = {
+            "action": broker.TRADE_ACTION_DEAL,
+            "symbol": pair.symbol,
+            "volume": pair.deal_size,
+            "type": broker.ORDER_TYPE_SELL,
+            "position": position,
+            "price": curr_price,
+            "comment": "python script close",
+            "type_time": broker.ORDER_TIME_GTC,
+            "type_filling": broker.ORDER_FILLING_IOC
+        }
+        # check order before placement
+        # check_result = broker.order_check(request)
+        responses.append(broker.order_send(request))
+
+    return responses
 
 
-def make_dft_trade(broker, pair, prev_trade_result):
+def make_dft_trade(broker, pair, prev_trade_result, verbose=True):
     numpoints = prev_trade_result["numpoints"]
     prev_position = prev_trade_result["position"]
 
@@ -63,40 +75,58 @@ def make_dft_trade(broker, pair, prev_trade_result):
     t_index = pair.prices.index[-1]
 
     # DFT algorithm
-    try:
-        curr_dft_position = len(broker.positions_get(symbol=pair.symbol))
-    except TypeError:
-        curr_dft_position = 0
+    pair.positions = broker.positions_get(symbol=pair.symbol)
+    curr_dft_position = len(pair.positions)
 
-    if curr_dft_position < prev_position:  # was stoploss
+    dft_signal = None
+    if len(pair.positions) < prev_position:  # there was a stoploss
         dft_signal = -2
-        if pair.idx_down_periods < len(N_DOWN_PERIODS) - 1:  # n_down_periods [3, 4, inf]
-            pair.idx_down_periods = pair.idx_down_periods + 1
-        logging.info(f"idx_n_down_periods {pair.idx_down_periods}")
-    else:
-        dft_signal, _ = pair.get_dft_signal(dft_period=pair.dft_period, verbose=True)
 
-    logging.info(f"{pair.symbol}, {t_index}, signal {dft_signal}, curr_dft_position {curr_dft_position}")
+    info = {}
+    dp_msg = None
+
+    if dft_signal is None:
+        dft_signal, info = pair.get_dft_signal(verbose=verbose)
+
+    if dft_signal == -1 and pair.idx_down_periods > 0:
+        pair.idx_down_periods = 0
+        dp_msg = f"reset DP, DP = {pair.n_down_periods[pair.idx_down_periods]}"
 
     if dft_signal != 0:
 
         if dft_signal == 1 and (pair.is_multibuying_available or curr_dft_position == 0):
-            # and pair.idx_down_periods != len(N_DOWN_PERIODS) - 1: - this condition is in get_dft_signal
-            resp_open = create_position(broker, pair)
+            resp_open = create_position(broker, pair, sl=info.get("upper_hf"))
+            curr_dft_position += 1
 
             if resp_open is not None:
-                curr_dft_position += 1
                 logging.info(f"{pair.symbol}, {t_index}, buy, order {resp_open.order}")
 
-        elif dft_signal == -1:
-            pair.idx_down_periods = 0
-            logging.info(f"idx_down_periods {pair.idx_down_periods}")
+        elif dft_signal in [-1, -3, -4] and curr_dft_position > 0:
+            resp_close = close_opened_position(broker, pair, identifiers=info.get("identifiers"))
+            pair.last_sell = t_index
+            done_orders = [r.order for r in resp_close if r.retcode == 10009]
+            logging.info(f"{pair.symbol}, {t_index}, sell, "
+                         f"orders {done_orders}")
+            curr_dft_position -= len(done_orders)
 
-            if curr_dft_position > 0:
-                resp_close = close_opened_position(broker, pair)
-                pair.last_sell = t_index
-                curr_dft_position -= 1
-                logging.info(f"{pair.symbol}, {t_index}, sell, order {resp_close.order}")
+        if dft_signal in [-2, -4]:
+            if pair.idx_down_periods < len(pair.n_down_periods) - 1:  # n_down_periods [3, 4, inf]
+                pair.idx_down_periods = pair.idx_down_periods + 1
+                dp_msg = f"increase DP, DP = {pair.n_down_periods[pair.idx_down_periods]}"
+
+    # it doesn't work because of a delay on the broker side
+    # curr_dft_position = len(broker.positions_get(symbol=pair.symbol))
+
+    logging.info(f"{pair.symbol}, {t_index}, signal {dft_signal}, "
+                 f"curr_dft_position {curr_dft_position}")
+    if dp_msg is not None:
+        logging.info(dp_msg)
+
+    if verbose and dft_signal != 0:
+        print(f"{t_index}, DFT signal: {dft_signal}, "
+              f"price: {pair.prices.loc[t_index, 'close']}")
+        if dp_msg is not None:
+            print(dp_msg)
 
     return {"numpoints": 2 * pair.resolution + 1, "position": curr_dft_position}
 

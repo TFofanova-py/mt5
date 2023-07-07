@@ -27,7 +27,7 @@ def was_stoploss(p: Pair, bal: dict) -> bool:
 
 def simulation_step(p: Pair, bal: dict) -> Tuple[datetime, int, bool]:
     t_last = p.prices.index[-1]
-    upper_timeframe_criterion = None
+    info = None
 
     signal = None
 
@@ -35,9 +35,9 @@ def simulation_step(p: Pair, bal: dict) -> Tuple[datetime, int, bool]:
         signal = -2
 
     if signal is None:
-        signal, upper_timeframe_criterion = p.get_dft_signal(dft_period=p.dft_period, save_history=False, verbose=False)
+        signal, info = p.get_dft_signal(save_history=False, verbose=False)
 
-    return t_last, signal, upper_timeframe_criterion
+    return t_last, signal, info.get("upper_timeframe_criterion")
 
 
 def update_pair(p: Pair, bal: dict, signal: int) -> Pair:
@@ -91,14 +91,15 @@ def update_balance(p: Pair, bal: dict, signal: int, info: dict = None) -> dict:
     return bal
 
 
-def early_stop(bal: dict, p: Pair, max_neg_inrow: int = 5, min_total_yield: float = -0.5) -> bool:
+def early_stop(bal: dict, p: Pair, max_neg_inrow: int = 5, min_total_yield: float = -0.5) -> Tuple[bool, str]:
     if bal["n_neg_inrow"] == max_neg_inrow:
-        return True
+        return True, f"more than {max_neg_inrow} negatives trades in a row"
 
     if bal["position"]["size"] > 0:
-        return False
+        return False, ""
 
-    return bal["cash"] / (p.get_curr_price() * p.deal_size) * 100 < min_total_yield
+    return bal["cash"] / (p.get_curr_price() * p.deal_size) * 100 < min_total_yield, \
+           f"cumulative yield less than {min_total_yield}"
 
 
 def run_simulate(**params) -> Union[Tuple[float, dict], None]:
@@ -156,9 +157,10 @@ def run_simulate(**params) -> Union[Tuple[float, dict], None]:
                     print(f"{t_index}, "
                           f"action {actions_dict[dft_signal]}, balance {balance}")
 
-            if early_stop(balance, pair,
-                          max_neg_inrow=params["max_neg_inrow"], min_total_yield=params["min_total_yield"]):
-                print("Early stop ", params)
+            is_stopped, reason = early_stop(balance, pair,
+                          max_neg_inrow=params["max_neg_inrow"], min_total_yield=params["min_total_yield"])
+            if is_stopped:
+                print("Early stop: ", reason)
                 break
 
         if balance["position"]["size"] > 0:

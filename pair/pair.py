@@ -12,6 +12,7 @@ from .constants import NUM_ATTEMPTS_FETCH_PRICES, \
 from .check_data import fix_missing
 from .yahoo_utils import get_yahoo_data
 from typing import Literal, Tuple, Union
+from .ta_utils import crossunder
 
 
 class Pair:
@@ -237,7 +238,14 @@ class Pair:
 
         return int(criterion), result
 
-    def get_dft_signal(self, dft_period=24, verbose=False, save_history=True) -> Tuple[int, bool]:
+    def get_dft_signal(self, verbose=False, save_history=True) -> Tuple[int, dict]:
+        def sharp_n_true(ser: pd.Series, n: int):
+            if ser.shape[0] < n:
+                return False
+            elif ser.shape[0] == n and all(ser):
+                return True
+            return all(ser.iloc[-n:]) and not ser.iloc[-n - 1]
+
         if self.prices is not None:
 
             # data must be without missing
@@ -253,13 +261,13 @@ class Pair:
             dft_df["True_range"] = dft_df.apply(lambda x: max(x["high"] - x["low"],
                                                               abs(x["high"] - x["close_1"]),
                                                               abs(x["low"] - x["close_1"])), axis=1)
-            dft_df["Atr"] = dft_df["True_range"].rolling(window=dft_period,
-                                                         min_periods=dft_period).mean()
+            dft_df["Atr"] = dft_df["True_range"].rolling(window=self.dft_period,
+                                                         min_periods=self.dft_period).mean()
             dft_df["Tol"] = dft_df["Atr"] * 0.2  # tolerance for placing triangles and prediction candles at borders
 
             signal = 0
             # evupin = crossover(dft_df["close"], dft_df["hf"])  # market enters up trend
-            evupout = self.crossunder(dft_df["close"], dft_df["hf"])  # market leaves up trend
+            evupout = crossunder(dft_df["close"], dft_df["hf"])  # market leaves up trend
 
             # if use information from upper timeframe (it has to be in blue zone - up trend)
             blue_dft_signal, info = self.get_blue_dft_signal(verbose=verbose)
@@ -270,26 +278,47 @@ class Pair:
 
             n_down_periods = self.n_down_periods[self.idx_down_periods]
             if self.idx_down_periods != len(self.n_down_periods) - 1 and \
-                    all(dft_df["lftrue"].iloc[-n_down_periods:]) and \
-                    not dft_df["lftrue"].iloc[-n_down_periods - 1] and \
+                    sharp_n_true(dft_df["lftrue"], n_down_periods) and \
                     (self.last_sell is None or self.last_sell < dft_df.index[-n_down_periods]) and \
                     blue_dft_signal:
-                # последние n_down_period были оранжевыми и с последней продажи прошло более n_down_periods периодов
+                # последние n_down_period были оранжевыми и с последней продажи прошло более n_down_periods периодов,
+                # обертка в синей зоне
 
                 signal = 1
 
-            if verbose and signal != 0:
-                t_ind = dft_df.index[-1]
-                print(f"{t_ind}, DFT signal: {signal}, "
-                      f"price: {dft_df.loc[t_ind, 'close']}, "
-                      f"levels: (hb: {dft_df.loc[t_ind, 'hb']}, "
-                      f"hf: {dft_df.loc[t_ind, 'hf']}, "
-                      f"lf: {dft_df.loc[t_ind, 'lf']},"
-                      f"lb: {dft_df.loc[t_ind, 'lb']})")
+            # if after unclear_trend_periods price isn't in blue zone, close the position
+            if len(self.positions) > 0:
+                durations = self.get_position_durations()
+                durations = durations[durations == self.unclear_trend_periods]
+                identifier_to_sell = durations.index[0] if durations.shape[0] > 0 else None
+
+                # if curr price isn't in blue zone and position is opened - all previous prices are out of the blue zone
+                if identifier_to_sell is not None and dft_df.iloc[-1]["close"] < dft_df.iloc[-1]["hf"]:
+                    signal = -3
+                    info["identifiers"] = [int(identifier_to_sell)]
+
+            for position in self.positions:
+                t = datetime.datetime.fromtimestamp(position.time, tz=pytz.UTC)
+                if sharp_n_true(dft_df[dft_df.index > t]["lftrue"], self.down_trend_periods):
+                    signal = -4
+                    if "identifiers" in info:
+                        info["identifiers"].append(int(position.identifier))
+                    else:
+                        info["identifiers"] = [int(position.identifier)]
 
             if save_history:
                 dft_df.to_csv(f"History/dft_{datetime.datetime.now().date()}_{self.resolution}min.csv")
-            return signal, info.get("upper_timeframe_criterion")
+
+            return signal, info
+
+    def get_position_durations(self) -> pd.Series:
+        assert len(self.positions) > 0, "There aren't any opened positions"
+        opened_pos_times = pd.DataFrame(self.positions,
+                                        columns=self.positions[0]._asdict().keys())[["identifier",
+                                                                                "time"]].set_index("identifier")
+        opened_pos_times = pd.to_datetime(opened_pos_times["time"], unit="s", utc=True)
+        curr_time = self.prices.index[-1]
+        return pd.Series(opened_pos_times).apply(lambda t: (curr_time - t).seconds / (60 * self.resolution)).astype(int)
 
     def cross_stop_loss(self, session, stop_price):
         self.fetch_prices(session)
