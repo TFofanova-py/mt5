@@ -19,10 +19,10 @@ class MultiIndPair:
             self.yahoo_symbol: str = kwargs.get("yahoo_symbol")  # symbol of the instrument on finance.yahoo.com
             self.resolution: int = kwargs.get("resolution", 3)  # time step for MT5 in minutes
 
-            self.deal_size: float = kwargs.get("deal_size", 1.0)  # deal size for opening position
+            self.deal_size: float = float(kwargs.get("deal_size", 1.0))  # volume for opening position must be a float
 
             # stop level coefficient for opening position
-            self.stop_coefficient: Union[float, Literal["hf"]] = kwargs.get("stop_coefficient", 0.9995)
+            self.stop_coefficient: float = kwargs.get("stop_coefficient", 0.9995)
 
             mt5_symbol_info = self.broker.symbol_info(self.symbol)
             self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
@@ -36,7 +36,7 @@ class MultiIndPair:
             self.max_bars_to_check: int = kwargs.get("max_bars_to_check", 100)
             self.dont_wait_for_confirmation: bool = kwargs.get("dont_wait_for_confirmation", True)
             self.indicators: dict = kwargs["entry"]
-            self.direction: Literal["low-long", "high-short"] = "low-long"
+            self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
             self.exit_strategy: str = kwargs.get("exit", "default")
 
             self.last_bottom_divergence = None
@@ -57,8 +57,12 @@ class MultiIndPair:
             msg = f"{self.resolution} minutes is not a standard MetaTrade5 timeframe, choose another resolution"
             print(msg)
         else:
-
             rates = self.broker.copy_rates_from_pos(self.symbol, interval, 0, numpoints)
+
+            if rates is None:
+                print(f"{self.symbol}: Can't get the historical data")
+                return None
+
             curr_prices = pd.DataFrame(rates)
             curr_prices["time"] = pd.to_datetime(curr_prices["time"], unit="s", utc=True)
             curr_prices.set_index("time", inplace=True)
@@ -254,6 +258,14 @@ class MultiIndPair:
 
         return 0
 
+    @staticmethod
+    def was_price_goes_up(data: pd.DataFrame) -> bool:
+        assert "close" in data.columns
+        assert data.shape[0] > 1
+        if data["close"].iloc[-1] > data["close"].iloc[-2]:
+            return True
+        return False
+
     def create_position(self, price: float, type_action: str, sl: float = None):
         if sl is None:
             if type_action == 0:
@@ -279,7 +291,7 @@ class MultiIndPair:
         # if the order is incorrect
         if check_result.retcode != 0:
             # error codes are here: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
-            print(check_result.retcode, check_result.comment)
+            print(check_result.retcode, check_result.comment, request)
             return None
 
         return self.broker.order_send(request)
@@ -300,6 +312,27 @@ class MultiIndPair:
                 "comment": "python script close",
                 "type_time": self.broker.ORDER_TIME_GTC,
                 "type_filling": self.broker.ORDER_FILLING_IOC
+            }
+            # check order before placement
+            # check_result = broker.order_check(request)
+            responses.append(self.broker.order_send(request))
+
+        return responses
+
+    def modify_sl(self, new_sls: List[float], identifiers: List[int] = None) -> list:
+        if identifiers is None:
+            identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
+
+        assert new_sls is not None
+        assert len(identifiers) == len(new_sls)
+
+        responses = []
+        for position, new_sl in zip(identifiers, new_sls):
+            request = {
+                "action": self.broker.TRADE_ACTION_SLTP,
+                "symbol": self.symbol,
+                "sl": new_sl,
+                "position": position
             }
             # check order before placement
             # check_result = broker.order_check(request)
