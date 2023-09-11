@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from .constants import MT5_TIMEFRAME
-from typing import Literal, Union, List, Tuple
+from typing import Literal, List
 from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
@@ -17,9 +17,14 @@ class MultiIndPair:
             self.broker = broker
             self.symbol: str = kwargs["symbol"]  # symbol of the instrument MT5
             self.yahoo_symbol: str = kwargs.get("yahoo_symbol")  # symbol of the instrument on finance.yahoo.com
-            self.resolution: int = kwargs.get("resolution", 3)  # time step for MT5 in minutes
+
+            # time steps for MT5 in minutes, they are different when open / close position
+            self.resolution_set: dict = kwargs.get("resolution", {"open": 3, "close": 3})
+            self.resolution: int = self.resolution_set["open"]
 
             self.deal_size: float = float(kwargs.get("deal_size", 1.0))  # volume for opening position must be a float
+            self.devaition: int = kwargs.get("deviation",
+                                             50)  # max number of points to squeeze when open / close position
 
             # stop level coefficient for opening position
             self.stop_coefficient: float = kwargs.get("stop_coefficient", 0.9995)
@@ -29,9 +34,15 @@ class MultiIndPair:
 
             self.positions: list = []
 
-            self.pivot_period: int = kwargs.get("pivot_period", 5)
+            # pivot periods, they are different when open / close position
+            self.pivot_period_set: dict = kwargs.get("pivot_period", {"open": 5, "close": 5})
+            self.pivot_period: int = self.pivot_period_set["open"]
+
             self.searchdiv = "Regular"  # "Regular/Hidden, Hidden
-            self.min_number_of_divergence: int = kwargs.get("min_number_of_divergence", 1)
+            self.min_number_of_divergence: dict = kwargs.get("min_number_of_divergence",
+                                                             {"entry": 1,
+                                                              "exit_sl": 1,
+                                                              "exit_tp": 1})
             self.max_pivot_points: int = kwargs.get("max_pivot_points", 10)
             self.max_bars_to_check: int = kwargs.get("max_bars_to_check", 100)
             self.dont_wait_for_confirmation: bool = kwargs.get("dont_wait_for_confirmation", True)
@@ -39,12 +50,19 @@ class MultiIndPair:
             self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
             self.exit_strategy: str = kwargs.get("exit", "default")
 
-            self.last_bottom_divergence = None
-            self.last_top_divergence = None
+            self.last_divergence = {"top": None, "bottom": None}
 
         except TypeError as e:
             logging.error(f"Error: {e}")
             print(f"Error: {e}")
+
+    def set_parameters_by_position(self):
+        if self.positions is None or len(self.positions) == 0:
+            self.resolution = self.resolution_set["open"]
+            self.pivot_period = self.pivot_period_set["open"]
+        else:
+            self.resolution = self.resolution_set["close"]
+            self.pivot_period = self.pivot_period_set["close"]
 
     def get_historical_data(self, numpoints: int = None):
 
@@ -52,7 +70,15 @@ class MultiIndPair:
             numpoints = self.max_bars_to_check
 
         try:
-            interval = MT5_TIMEFRAME[str(self.resolution) + "m"]
+            if 60 <= self.resolution < 60 * 24 and self.resolution % 60 == 0:
+                interval = MT5_TIMEFRAME[str(self.resolution // 60) + "h"]
+            elif self.resolution == 60 * 24:
+                interval = MT5_TIMEFRAME["1d"]
+            elif self.resolution == 60 * 24 * 7:
+                interval = MT5_TIMEFRAME["1wk"]
+            else:
+                interval = MT5_TIMEFRAME[str(self.resolution) + "m"]
+
         except KeyError:
             msg = f"{self.resolution} minutes is not a standard MetaTrade5 timeframe, choose another resolution"
             print(msg)
@@ -71,75 +97,48 @@ class MultiIndPair:
 
             return curr_prices
 
-    def positive_regular_positive_hidden_divergence(self, src: pd.Series, close: pd.Series,
-                                                    pl_vals: np.array, pl_positions: np.array,
-                                                    cond: int = 1):
-        # function to check positive regular or negative hidden divergence
-        # cond == 1 = > positive_regular, cond == 2 = > negative_hidden
+    @staticmethod
+    def arrived_divergence(src, close, startpoint, length, np_func):
+        virtual_line_src = np.linspace(src.iloc[-length - 1], src.iloc[-startpoint - 1],
+                                       length - startpoint)
+        virtual_line_close = np.linspace(close.iloc[-length - 1], close.iloc[-startpoint - 1],
+                                         length - startpoint)
 
-        divlen = 0
-        # if pl_positions.iloc[-1] == pl_positions.iloc[-2]:
-        #     return divlen
+        return all(np_func(src.iloc[-length - 1: -startpoint - 1], virtual_line_src)) and \
+               all(np_func(close.iloc[-length - 1: -startpoint - 1], virtual_line_close))
 
-        # if indicators higher than last value and close price is higher than las close
-        if self.dont_wait_for_confirmation or src.iloc[-1] > src.iloc[-2] or close.iloc[-1] > close.iloc[-2]:
-            startpoint = 0 if self.dont_wait_for_confirmation else 1
+    def divergence_length(self, src: pd.Series, close: pd.Series,
+                          pivot_vals: np.array, pivot_positions: np.array,
+                          mode: Literal["positive_regular", "negative_regular",
+                                        "positive_hidden", "negative_hidden"]):
 
-            for x in range(0, min(len(pl_positions), self.max_pivot_points)):
-                length = src.index[-1] - pl_positions.iloc[-x - 1] + self.pivot_period
+        def is_suspected():
+            func_src = np.greater if mode in ["positive_regular", "negative_hidden"] else np.less
+            func_close = np.less if mode in ["positive_regular", "negative_hidden"] else np.greater
 
-                # if we reach non valued array element or arrived 101. or previous bars then we don't search more
-                if pl_positions.iloc[-x - 1] == 0 or length > self.max_bars_to_check - 1:
-                    break
-
-                if length > 5 and \
-                        ((cond == 1 and src.iloc[-startpoint - 1] > src.iloc[-length - 1] and close.iloc[
-                            -startpoint - 1] < pl_vals.iloc[-x - 1]) or \
-                         (cond == 2 and src.iloc[-startpoint - 1] < src.iloc[-length - 1] and close.iloc[
-                             -startpoint - 1] > pl_vals.iloc[-x - 1])):
-
-                    virtual_line_src = np.linspace(src.iloc[-length - 1], src.iloc[-startpoint - 1],
-                                                   length - startpoint)
-                    virtual_line_close = np.linspace(close.iloc[-length - 1], close.iloc[-startpoint - 1],
-                                                     length - startpoint)
-                    arrived = all(src.iloc[-length - 1: -startpoint - 1] >= virtual_line_src) and \
-                              all(close.iloc[-length - 1: -startpoint - 1] >= virtual_line_close)
-
-                    if arrived:
-                        divlen = length
-                        break
-
-        return divlen
-
-    def negative_regular_negative_hidden_divergence(self, src: pd.Series, close: pd.Series,
-                                                    ph_vals: np.array, ph_positions: np.array,
-                                                    cond: int = 1):
-        # function to check negative regular or positive hidden divergence
-        # cond == 1 = > negative_regular, cond == 2 = > positive_hidden
+            return func_src(src.iloc[-startpoint - 1], src.iloc[-length - 1]) and \
+                   func_close(close.iloc[-startpoint - 1], pivot_vals.iloc[-x - 1])
 
         divlen = 0
 
-        # if indicators less than last value or close price is less than last close
-        if self.dont_wait_for_confirmation or src.iloc[-1] < src.iloc[-2] or close.iloc[-1] < close.iloc[-2]:
+        confirm_func = np.greater if mode in ["positive_regular", "positive_hidden"] else np.less
+        scr_or_close_confirm = confirm_func(src.iloc[-1], src.iloc[-2]) and confirm_func(close.iloc[-1], close.iloc[-2])
+
+        if self.dont_wait_for_confirmation or scr_or_close_confirm:
             startpoint = 0 if self.dont_wait_for_confirmation else 1
 
-            for x in range(0, min(len(ph_positions), self.max_pivot_points)):
-                length = src.index[-1] - ph_positions.iloc[-x - 1] + self.pivot_period
-                # if we reach non valued array element or arrived 101. or previous bars then we don't search more
-                if ph_positions.iloc[-x - 1] == 0 or length > self.max_bars_to_check - 1:
-                    break
-                if length > 5 and \
-                        ((cond == 1 and src.iloc[-startpoint - 1] < src.iloc[-length - 1] and close.iloc[
-                            -startpoint - 1] > ph_vals.iloc[-x - 1]) or \
-                         (cond == 2 and src.iloc[-startpoint - 1] > src.iloc[-length - 1] and close.iloc[
-                             -startpoint - 1] < ph_vals.iloc[-x - 1])):
+            for x in range(0, min(len(pivot_positions), self.max_pivot_points)):
+                length = src.index[-1] - pivot_positions.iloc[-x - 1] + self.pivot_period
 
-                    virtual_line_src = np.linspace(src.iloc[-length - 1], src.iloc[-startpoint - 1],
-                                                   length - startpoint)
-                    virtual_line_close = np.linspace(close.iloc[-length - 1], close.iloc[-startpoint - 1],
-                                                     length - startpoint)
-                    arrived = all(src.iloc[-length - 1: -startpoint - 1] <= virtual_line_src) and \
-                              all(close.iloc[-length - 1: -startpoint - 1] <= virtual_line_close)
+                # if we reach non valued array element or arrived 101. or previous bars then we don't search more
+                if pivot_positions.iloc[-x - 1] == 0 or length > self.max_bars_to_check - 1:
+                    break
+
+                if length > 5 and is_suspected():
+                    arrived_func = np.greater_equal if mode in ["positive_regular", "positive_hidden"] \
+                        else np.less_equal
+
+                    arrived = self.arrived_divergence(src, close, startpoint, length, arrived_func)
 
                     if arrived:
                         divlen = length
@@ -153,19 +152,16 @@ class MultiIndPair:
         divs = np.zeros(4, dtype=int)
 
         if self.searchdiv in ["Regular", "Regular/Hidden"]:
-            divs[0] = self.positive_regular_positive_hidden_divergence(indicator, close,
-                                                                       pl_vals, pl_positions, 1)
-            divs[1] = self.negative_regular_negative_hidden_divergence(indicator, close,
-                                                                       ph_vals, ph_positions, 1)
+            divs[0] = self.divergence_length(indicator, close, pl_vals, pl_positions, "positive_regular")
+            divs[1] = self.divergence_length(indicator, close, ph_vals, ph_positions, "negative_regular")
+
         if self.searchdiv in ["Hidden", "Regular/Hidden"]:
-            divs[2] = self.positive_regular_positive_hidden_divergence(indicator, close,
-                                                                       pl_vals, pl_positions, 2)
-            divs[3] = self.negative_regular_negative_hidden_divergence(indicator, close,
-                                                                       ph_vals, ph_positions, 2)
+            divs[2] = self.divergence_length(indicator, close, pl_vals, pl_positions, "positive_hidden")
+            divs[3] = self.divergence_length(indicator, close, ph_vals, ph_positions, "negative_hidden")
 
         return divs
 
-    def get_divergence_signal(self, data: pd.DataFrame) -> int:
+    def count_divergence(self, data: pd.DataFrame) -> dict:
 
         ind_ser: List[pd.Series] = []
         indices: List[str] = []
@@ -234,29 +230,23 @@ class MultiIndPair:
         div_signals.iloc[:, 0] = np.any((all_divergences > 0) * top_mask, axis=1).astype(int)
         div_signals.iloc[:, 1] = np.any((all_divergences > 0) * bottom_mask, axis=1).astype(int)
 
-        if div_signals["top"].sum() >= self.min_number_of_divergence:
-            # if it was a pivot high after last top divergence
-            if self.last_top_divergence is not None:
+        # update last_divergence and return
+        for t in ["top", "bottom"]:
+            if div_signals[t].sum() > 0:
+                # if it was a pivot high/ low after last top/ bottom divergence
+                new_divergence = True
+                if self.last_divergence[t] is not None and self.last_divergence[t] >= data.index[0]:
 
-                idx = data.index.get_loc(self.last_top_divergence)
-                if ph_positions.iloc[-1] <= idx:
-                    return 0
+                    idx = data.index.get_loc(self.last_divergence[t])
 
-            self.last_top_divergence = data.index[-1]
-            return -1
+                    new_divergence = (pl_positions.iloc[-1] > idx) if t == "bottom" else (ph_positions.iloc[-1] > idx)
 
-        if div_signals["bottom"].sum() >= self.min_number_of_divergence:
-            # if it was a pivot low after last bottom divergence
-            if self.last_bottom_divergence is not None:
+                if new_divergence:
+                    self.last_divergence[t] = data.index[-1]
+                    return {"top": div_signals["top"].sum(),
+                            "bottom": div_signals["bottom"].sum()}
 
-                idx = data.index.get_loc(self.last_bottom_divergence)
-                if pl_positions.iloc[-1] <= idx:
-                    return 0
-
-            self.last_bottom_divergence = data.index[-1]
-            return 1
-
-        return 0
+        return {"top": 0, "bottom": 0}
 
     @staticmethod
     def was_price_goes_up(data: pd.DataFrame) -> bool:
@@ -277,6 +267,7 @@ class MultiIndPair:
             "action": self.broker.TRADE_ACTION_DEAL,  # for non market order TRADE_ACTION_PENDING
             "symbol": self.symbol,
             "volume": self.deal_size,
+            "deviation": self.devaition,
             "type": type_action,
             "price": price,
             "sl": sl,
@@ -306,6 +297,7 @@ class MultiIndPair:
                 "action": self.broker.TRADE_ACTION_DEAL,
                 "symbol": self.symbol,
                 "volume": self.deal_size,
+                "deviation": self.devaition,
                 "type": type_action,
                 "position": position,
                 "price": price,
