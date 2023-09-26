@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from .constants import MT5_TIMEFRAME
-from typing import Literal, List
+from typing import Literal, List, Tuple
 from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
@@ -12,90 +12,221 @@ from .ta_utils import (
 class MultiIndPair:
 
     def __init__(self, broker, kwargs):
-
         try:
             self.broker = broker
+            self.strategy = MultiIndStrategy(**kwargs)
             self.symbol: str = kwargs["symbol"]  # symbol of the instrument MT5
-            self.yahoo_symbol: str = kwargs.get("yahoo_symbol")  # symbol of the instrument on finance.yahoo.com
-
-            # time steps for MT5 in minutes, they are different when open / close position
-            self.resolution_set: dict = kwargs.get("resolution", {"open": 3, "close": 3})
-            self.resolution: int = self.resolution_set["open"]
-
+            self.datasource_symbol: str = kwargs.get("datasource_symbol")  # symbol of the instrument on datasource
+            self.data_source: Literal["mt5", "capital"] = kwargs.get("data_source", "mt5")
+            self.resolution: int = self.strategy.resolution_set["open"]
             self.deal_size: float = float(kwargs.get("deal_size", 1.0))  # volume for opening position must be a float
             self.devaition: int = kwargs.get("deviation",
                                              50)  # max number of points to squeeze when open / close position
-
             # stop level coefficient for opening position
             self.stop_coefficient: float = kwargs.get("stop_coefficient", 0.9995)
 
             mt5_symbol_info = self.broker.symbol_info(self.symbol)
             self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
-
             self.positions: list = []
-
-            # pivot periods, they are different when open / close position
-            self.pivot_period_set: dict = kwargs.get("pivot_period", {"open": 5, "close": 5})
-            self.pivot_period: int = self.pivot_period_set["open"]
-
-            self.searchdiv = "Regular"  # "Regular/Hidden, Hidden
-            self.min_number_of_divergence: dict = kwargs.get("min_number_of_divergence",
-                                                             {"entry": 1,
-                                                              "exit_sl": 1,
-                                                              "exit_tp": 1})
-            self.max_pivot_points: int = kwargs.get("max_pivot_points", 10)
-            self.max_bars_to_check: int = kwargs.get("max_bars_to_check", 100)
-            self.dont_wait_for_confirmation: bool = kwargs.get("dont_wait_for_confirmation", True)
-            self.indicators: dict = kwargs["entry"]
-            self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
-            self.exit_strategy: str = kwargs.get("exit", "default")
-
-            self.last_divergence = {"top": None, "bottom": None}
 
         except TypeError as e:
             logging.error(f"Error: {e}")
             print(f"Error: {e}")
 
     def set_parameters_by_position(self):
-        if self.positions is None or len(self.positions) == 0:
-            self.resolution = self.resolution_set["open"]
-            self.pivot_period = self.pivot_period_set["open"]
-        else:
-            self.resolution = self.resolution_set["close"]
-            self.pivot_period = self.pivot_period_set["close"]
+        has_opened_positons = not (self.positions is None or len(self.positions) == 0)
+        self.strategy.set_parameters_by_position(has_opened_positons)
 
-    def get_historical_data(self, numpoints: int = None):
+        if not has_opened_positons:
+            self.resolution = self.strategy.resolution_set["open"]
+        else:
+            self.resolution = self.strategy.resolution_set["close"]
+
+    def get_historical_data(self, **kwargs):
+
+        numpoints = kwargs.get("numpoints", None)
+        capital_conn = kwargs.get("capital_conn", None)
 
         if numpoints is None:
-            numpoints = self.max_bars_to_check
+            numpoints = self.strategy.max_bars_to_check
 
-        try:
-            if 60 <= self.resolution < 60 * 24 and self.resolution % 60 == 0:
-                interval = MT5_TIMEFRAME[str(self.resolution // 60) + "h"]
-            elif self.resolution == 60 * 24:
-                interval = MT5_TIMEFRAME["1d"]
-            elif self.resolution == 60 * 24 * 7:
-                interval = MT5_TIMEFRAME["1wk"]
+        if self.data_source == "mt5":
+
+            try:
+                if 60 <= self.resolution < 60 * 24 and self.resolution % 60 == 0:
+                    interval = MT5_TIMEFRAME[str(self.resolution // 60) + "h"]
+                elif self.resolution == 60 * 24:
+                    interval = MT5_TIMEFRAME["1d"]
+                elif self.resolution == 60 * 24 * 7:
+                    interval = MT5_TIMEFRAME["1wk"]
+                else:
+                    interval = MT5_TIMEFRAME[str(self.resolution) + "m"]
+
+            except KeyError:
+                msg = f"{self.resolution} minutes is not a standard MetaTrade5 timeframe, choose another resolution"
+                print(msg)
             else:
-                interval = MT5_TIMEFRAME[str(self.resolution) + "m"]
+                rates = self.broker.copy_rates_from_pos(self.symbol, interval, 0, numpoints)
 
-        except KeyError:
-            msg = f"{self.resolution} minutes is not a standard MetaTrade5 timeframe, choose another resolution"
-            print(msg)
-        else:
-            rates = self.broker.copy_rates_from_pos(self.symbol, interval, 0, numpoints)
+                if rates is None:
+                    print(f"{self.symbol}: Can't get the historical data")
+                    return None
+
+                curr_prices = pd.DataFrame(rates)
+                curr_prices["time"] = pd.to_datetime(curr_prices["time"], unit="s", utc=True)
+                curr_prices.set_index("time", inplace=True)
+                curr_prices = curr_prices[["close", "open", "high", "low", "tick_volume"]]
+                curr_prices = curr_prices.rename({"tick_volume": "volume"}, axis=1)
+
+                return curr_prices
+
+        elif self.data_source == "capital":
+
+            assert capital_conn is not None, "capital_conn mustn't be None"
+
+            rates = capital_conn.get_capital_data(self.datasource_symbol, self.resolution, numpoints)
 
             if rates is None:
                 print(f"{self.symbol}: Can't get the historical data")
                 return None
 
-            curr_prices = pd.DataFrame(rates)
-            curr_prices["time"] = pd.to_datetime(curr_prices["time"], unit="s", utc=True)
-            curr_prices.set_index("time", inplace=True)
-            curr_prices = curr_prices[["close", "open", "high", "low", "tick_volume"]]
-            curr_prices = curr_prices.rename({"tick_volume": "volume"}, axis=1)
-
+            rates_agg = [{k: (v["bid"] + v["ask"]) / 2 if type(v) == dict else v for k, v in y.items()} for y in
+                          rates]
+            curr_prices = pd.DataFrame.from_dict(rates_agg, orient="columns")
+            curr_prices = curr_prices.drop("snapshotTime", axis=1).set_index("snapshotTimeUTC")
+            curr_prices = curr_prices.rename({"closePrice": "close", "highPrice": "high",
+                                              "lowPrice": "low", "openPrice": "open",
+                                              "lastTradedVolume": "volume"}, axis=1)
             return curr_prices
+
+    def create_position(self, price: float, type_action: int, sl: float = None):
+        if sl is None:
+            if type_action == 0:
+                sl = round(price * self.stop_coefficient, abs(int(np.log10(self.trade_tick_size))))
+            else:
+                sl = round(price * (2. - self.stop_coefficient), abs(int(np.log10(self.trade_tick_size))))
+
+        request = {
+            "action": self.broker.TRADE_ACTION_DEAL,  # for non market order TRADE_ACTION_PENDING
+            "symbol": self.symbol,
+            "volume": self.deal_size,
+            "deviation": self.devaition,
+            "type": type_action,
+            "price": price,
+            "sl": sl,
+            "comment": "python script open",
+            "type_time": self.broker.ORDER_TIME_GTC,
+            "type_filling": self.broker.ORDER_FILLING_IOC
+        }
+
+        # check order before placement
+        check_result = self.broker.order_check(request)
+
+        # if the order is incorrect
+        if check_result.retcode != 0:
+            # error codes are here: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
+            print(check_result.retcode, check_result.comment, request)
+            return None
+
+        return self.broker.order_send(request)
+
+    def close_opened_position(self, price: float, type_action: str, identifiers: List[int] = None) -> list:
+        if identifiers is None:
+            identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
+
+        responses = []
+        for position in identifiers:
+            request = {
+                "action": self.broker.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": self.deal_size,
+                "deviation": self.devaition,
+                "type": type_action,
+                "position": position,
+                "price": price,
+                "comment": "python script close",
+                "type_time": self.broker.ORDER_TIME_GTC,
+                "type_filling": self.broker.ORDER_FILLING_IOC
+            }
+            # check order before placement
+            # check_result = broker.order_check(request)
+            responses.append(self.broker.order_send(request))
+
+        return responses
+
+    def modify_sl(self, new_sls: List[float], identifiers: List[int] = None) -> list:
+        if identifiers is None:
+            identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
+
+        assert new_sls is not None
+        assert len(identifiers) == len(new_sls)
+
+        responses = []
+        for position, new_sl in zip(identifiers, new_sls):
+            request = {
+                "action": self.broker.TRADE_ACTION_SLTP,
+                "symbol": self.symbol,
+                "sl": new_sl,
+                "position": position
+            }
+            # check order before placement
+            # check_result = broker.order_check(request)
+            responses.append(self.broker.order_send(request))
+
+        return responses
+
+    def make_action(self, type_action: int, action_details: dict):
+
+        curr_time = action_details["curr_time"]
+
+        if type_action in [self.broker.ORDER_TYPE_BUY, self.broker.ORDER_TYPE_SELL]:
+            assert "price" in action_details, f"{self.symbol}, Price is required for action type {type_action}"
+            price = action_details["price"]
+
+            if len(self.positions) == 0:
+                response = self.create_position(price=price, type_action=type_action)
+                self.resolution = self.strategy.resolution_set["close"]
+
+                logging.info(f"{curr_time}, open position: {response}")
+                print(response)
+
+            else:
+                responses = self.close_opened_position(price=price, type_action=type_action)
+                print(responses)
+                logging.info(f"{curr_time}, close position: {responses}")
+
+        elif type_action == self.broker.TRADE_ACTION_SLTP:
+            # modify stop-loss
+            assert "new_sls" in action_details, f"new_sls is required for modifying SL"
+            new_sls = action_details["new_sls"]
+            responses = self.modify_sl(new_sls)
+            print("modify stop-loss", responses)
+            logging.info(f"{curr_time}, modify position: {responses}")
+
+
+class MultiIndStrategy:
+    def __init__(self, **kwargs):
+        self.resolution_set: dict = kwargs.get("resolution", {"open": 3, "close": 3})
+        self.pivot_period_set: dict = kwargs.get("pivot_period", {"open": 5, "close": 5})
+        self.pivot_period: int = self.pivot_period_set["open"]
+
+        self.searchdiv = "Regular"  # "Regular/Hidden, Hidden
+        self.min_number_of_divergence: dict = kwargs.get("min_number_of_divergence",
+                                                         {"entry": 1,
+                                                          "exit_sl": 1,
+                                                          "exit_tp": 1})
+        self.max_pivot_points: int = kwargs.get("max_pivot_points", 10)
+        self.max_bars_to_check: int = kwargs.get("max_bars_to_check", 100)
+        self.dont_wait_for_confirmation: bool = kwargs.get("dont_wait_for_confirmation", True)
+        self.indicators: dict = kwargs["entry"]
+        self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
+        self.last_divergence = {"top": None, "bottom": None}
+
+    def set_parameters_by_position(self, has_opened_positions: bool):
+        if not has_opened_positions:
+            self.pivot_period = self.pivot_period_set["open"]
+        else:
+            self.pivot_period = self.pivot_period_set["close"]
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
@@ -256,78 +387,59 @@ class MultiIndPair:
             return True
         return False
 
-    def create_position(self, price: float, type_action: str, sl: float = None):
-        if sl is None:
-            if type_action == 0:
-                sl = round(price * self.stop_coefficient, abs(int(np.log10(self.trade_tick_size))))
+    def get_action(self, data: pd.DataFrame, pair: MultiIndPair) -> Tuple[int, dict]:
+        divergences_cnt = self.count_divergence(data)
+
+        if divergences_cnt["top"] + divergences_cnt["bottom"] > 0:
+            print(f"{pair.symbol}: divergences {divergences_cnt}")
+            logging.info(f"{data.index[-1]}, number divergences: {divergences_cnt}")
+
+        type_action = None
+        details = {"curr_time": data.index[-1]}
+
+        if self.direction in ["low-long", "bi"] and \
+                divergences_cnt["bottom"] >= self.min_number_of_divergence["entry"] and \
+                len(pair.positions) == 0:
+            type_action = pair.broker.ORDER_TYPE_BUY
+
+        elif self.direction in ["high-short", "bi"] and \
+                divergences_cnt["top"] >= self.min_number_of_divergence["entry"] and \
+                len(pair.positions) == 0:
+            type_action = pair.broker.ORDER_TYPE_SELL
+
+        elif len(pair.positions) > 0:
+            same_direction_divergences = divergences_cnt["bottom"] if pair.positions[0].type == 0 \
+                else divergences_cnt["top"]
+            opposite_direction_divergences = divergences_cnt["top"] if pair.positions[0].type == 0 else divergences_cnt[
+                "bottom"]
+
+            if same_direction_divergences >= self.min_number_of_divergence["exit_sl"] or \
+                    opposite_direction_divergences >= self.min_number_of_divergence["exit_tp"]:
+                # close position
+                type_action = (pair.positions[0].type + 1) % 2
+
             else:
-                sl = round(price * (2. - self.stop_coefficient), abs(int(np.log10(self.trade_tick_size))))
+                # modify stop-loss
+                price = data["close"].iloc[-1]
+                price_goes_up = self.was_price_goes_up(data)
+                new_sls = None
 
-        request = {
-            "action": self.broker.TRADE_ACTION_DEAL,  # for non market order TRADE_ACTION_PENDING
-            "symbol": self.symbol,
-            "volume": self.deal_size,
-            "deviation": self.devaition,
-            "type": type_action,
-            "price": price,
-            "sl": sl,
-            "comment": "python script open",
-            "type_time": self.broker.ORDER_TIME_GTC,
-            "type_filling": self.broker.ORDER_FILLING_IOC
-        }
+                if pair.positions[0].type == 0 and price_goes_up:
+                    # if long and price goes up, move sl up
+                    new_sl = round(price * pair.stop_coefficient, abs(int(np.log10(pair.trade_tick_size))))
+                    if new_sl > pair.positions[0].sl:
+                        new_sls = [new_sl]
+                elif pair.positions[0].type == 1 and not price_goes_up:
+                    # if short and price goes down, move sl down
+                    new_sl = round(price * (2. - pair.stop_coefficient), abs(int(np.log10(pair.trade_tick_size))))
+                    if new_sl < pair.positions[0].sl:
+                        new_sls = [new_sl]
 
-        # check order before placement
-        check_result = self.broker.order_check(request)
+                if new_sls is not None:
+                    type_action = pair.broker.TRADE_ACTION_SLTP
+                    details.update({"new_sls": new_sls})
 
-        # if the order is incorrect
-        if check_result.retcode != 0:
-            # error codes are here: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
-            print(check_result.retcode, check_result.comment, request)
-            return None
+        if type_action in [pair.broker.ORDER_TYPE_BUY, pair.broker.ORDER_TYPE_SELL]:
+            details.update({"price": data["close"].iloc[-1]})
 
-        return self.broker.order_send(request)
-
-    def close_opened_position(self, price: float, type_action: str, identifiers: List[int] = None) -> list:
-        if identifiers is None:
-            identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
-
-        responses = []
-        for position in identifiers:
-            request = {
-                "action": self.broker.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": self.deal_size,
-                "deviation": self.devaition,
-                "type": type_action,
-                "position": position,
-                "price": price,
-                "comment": "python script close",
-                "type_time": self.broker.ORDER_TIME_GTC,
-                "type_filling": self.broker.ORDER_FILLING_IOC
-            }
-            # check order before placement
-            # check_result = broker.order_check(request)
-            responses.append(self.broker.order_send(request))
-
-        return responses
-
-    def modify_sl(self, new_sls: List[float], identifiers: List[int] = None) -> list:
-        if identifiers is None:
-            identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
-
-        assert new_sls is not None
-        assert len(identifiers) == len(new_sls)
-
-        responses = []
-        for position, new_sl in zip(identifiers, new_sls):
-            request = {
-                "action": self.broker.TRADE_ACTION_SLTP,
-                "symbol": self.symbol,
-                "sl": new_sl,
-                "position": position
-            }
-            # check order before placement
-            # check_result = broker.order_check(request)
-            responses.append(self.broker.order_send(request))
-
-        return responses
+        return type_action, details

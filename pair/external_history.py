@@ -1,7 +1,11 @@
+import json
 from typing import Union
 import yfinance as yf
 from datetime import datetime, timedelta
 import pandas as pd
+import requests
+from pair.constants import CAPITAL_TIMEFRAME
+from tenacity import retry, stop_after_attempt
 
 
 def get_yahoo_data(symbol: str, interval="1m", n_periods: int = 3, max_rows: int = None) -> Union[pd.DataFrame, None]:
@@ -48,6 +52,50 @@ def get_yahoo_data(symbol: str, interval="1m", n_periods: int = 3, max_rows: int
     return None
 
 
+class CapitalConnection():
+    def __init__(self, api_key: str, identifier: str, password: str):
+        self.headers = None
+
+        req_headers = {'X-CAP-API-KEY': api_key, 'Content-Type': 'application/json'}
+        payload = {"encryptedPassword": "false", "identifier": identifier, "password": password}
+
+        res = requests.post("https://api-capital.backend-capital.com/api/v1/session",
+                            json=payload,
+                            headers=req_headers)
+        if res.status_code == 200:
+            self.headers = {"CST": res.headers["CST"],
+                            "X-SECURITY-TOKEN": res.headers["X-SECURITY-TOKEN"]}
+
+    @retry(stop=stop_after_attempt(5))
+    def get_capital_data(self, ds_symbol: str, resolution: int, numpoints: int = 100) -> Union[list, None]:
+
+        capital_resolution = CAPITAL_TIMEFRAME[resolution]
+        url = "https://api-capital.backend-capital.com/api/v1/prices/" + ds_symbol + "?resolution=" + capital_resolution + "&max=" + str(
+            numpoints)
+        res = requests.get(url, headers=self.headers)
+
+        if res.status_code == 200:
+            prices = json.loads(res.text)["prices"]
+
+            return prices
+
+        print("Error:", ds_symbol, res.content)
+        return None
+
+    @retry(stop=stop_after_attempt(5))
+    def search_for_epic(self, search_term: str):
+        url = "https://api-capital.backend-capital.com/api/v1/markets?searchTerm=" + search_term
+        res = requests.get(url, headers=self.headers)
+
+        if res.status_code == 200:
+            return json.loads(res.text)
+
+        return None
+
+
 if __name__ == "__main__":
-    data = get_yahoo_data("ES=F")
-    data.to_csv("Tests/SP500_yahoo_data.csv")
+    api_key, identifier, password = json.load(open("../multi_config.json"))["capital_creds"].values()
+    conn = CapitalConnection(api_key=api_key, identifier=identifier, password=password)
+    data = conn.get_capital_data("EURGBP", resolution=5, numpoints=500)
+    print(data)
+    # data.to_csv("Tests/SP500_yahoo_data.csv")

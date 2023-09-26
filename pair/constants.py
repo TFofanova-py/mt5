@@ -16,4 +16,9 @@ MT5_TIMEFRAME = {"1m": mt5.TIMEFRAME_M1, "2m": mt5.TIMEFRAME_M2, "3m": mt5.TIMEF
                  "3h": mt5.TIMEFRAME_H3, "4h": mt5.TIMEFRAME_H4, "6h": mt5.TIMEFRAME_H6, "12h": mt5.TIMEFRAME_H12,
                  "1d": mt5.TIMEFRAME_D1, "1wk": mt5.TIMEFRAME_W1
                  }
+
+CAPITAL_TIMEFRAME = {1: "MINUTE", 5: "MINUTE_5", 15: "MINUTE_15",
+                     30: "MINUTE_30", 60: "HOUR", 240: "HOUR_4",
+                     1440: "DAY", 10080: "WEEK"
+                     }
 EPSILON = 1e-4
