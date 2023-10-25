@@ -1,3 +1,5 @@
+import datetime
+from datetime import timedelta
 import logging
 import pandas as pd
 import numpy as np
@@ -7,14 +9,16 @@ from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
     pivotlow, pivothigh)
+import os
+from MetaTrader5 import OrderSendResult
 
 
 class MultiIndPair:
 
-    def __init__(self, broker, kwargs):
+    def __init__(self, broker, strategy_id, kwargs):
         try:
             self.broker = broker
-            self.strategy = MultiIndStrategy(**kwargs)
+            self.strategy = MultiIndStrategy(strategy_id, **kwargs)
             self.symbol: str = kwargs["symbol"]  # symbol of the instrument MT5
             self.datasource_symbol: str = kwargs.get("datasource_symbol")  # symbol of the instrument on datasource
             self.data_source: Literal["mt5", "capital"] = kwargs.get("data_source", "mt5")
@@ -91,7 +95,7 @@ class MultiIndPair:
                 return None
 
             rates_agg = [{k: (v["bid"] + v["ask"]) / 2 if type(v) == dict else v for k, v in y.items()} for y in
-                          rates]
+                         rates]
             curr_prices = pd.DataFrame.from_dict(rates_agg, orient="columns")
             curr_prices = curr_prices.drop("snapshotTime", axis=1).set_index("snapshotTimeUTC")
             curr_prices = curr_prices.rename({"closePrice": "close", "highPrice": "high",
@@ -194,6 +198,7 @@ class MultiIndPair:
                 responses = self.close_opened_position(price=price, type_action=type_action)
                 print(responses)
                 logging.info(f"{curr_time}, close position: {responses}")
+                # self.save_trade(responses, file_name="../trades.csv")
 
         elif type_action == self.broker.TRADE_ACTION_SLTP:
             # modify stop-loss
@@ -203,11 +208,83 @@ class MultiIndPair:
             print("modify stop-loss", responses)
             logging.info(f"{curr_time}, modify position: {responses}")
 
+    def was_stoploss(self):
+        to_dt = datetime.datetime.now()
+        from_dt = to_dt - timedelta(minutes=self.resolution)
+        self.broker.HistorySelect(from_dt, to_dt)
+        total = self.broker.HistoryDealsTotal()
+        for i in range(total):
+            ticket = self.broker.HistoryDealGetTicket(i)
+            if self.broker.HistoryDealGetInteger(ticket, self.broker.DEAL_REASON) == self.broker.DEAL_REASON_SL:
+                sl_time = self.broker.HistoryDealGetInteger(ticket, self.broker.DEAL_TIME)
+                sl_price = self.broker.HistoryDealGetDouble(ticket, self.broker.DEAL_PRICE)
+                return True, (sl_time, sl_price)
+
+        return False, ()
+
+    def save_trade(self,
+                   reason: Literal["Normal", "Stoploss"],
+                   responses: List[OrderSendResult],
+                   stoploss_details: Tuple[datetime.datetime, float],
+                   file_name: str = "../trades.csv"):
+        df_trade = None
+        if os.path.exists(file_name):
+            df_trade = pd.read_csv(file_name)
+
+        data = None
+
+        if reason == "Normal":
+            response = responses[0]
+            id_open_position = response.request.position
+
+            if not self.broker.HistorySelectByPosition(id_open_position):
+                logging.error("Something wrong with getting info about opening position, can't save trade")
+
+            total = self.broker.HistoryDealsTotal()
+
+            start_ticket = self.broker.HistoryDealGetTicket(total - 2)
+            end_ticket = self.broker.HistoryDealGetTicket(total - 1)
+
+            if start_ticket and end_ticket:
+                start_time = self.broker.HistoryDealGetInteger(start_ticket, self.broker.DEAL_TIME)
+                start_price = self.broker.HistoryDealGetDouble(start_ticket, self.broker.DEAL_PRICE)
+                end_time = self.broker.HistoryDealGetInteger(end_ticket, self.broker.DEAL_TIME)
+                end_price = self.broker.HistoryDealGetDouble(end_ticket, self.broker.DEAL_PRICE)
+
+                data = pd.DataFrame.from_dict({"time_start": [start_time],
+                                               "time_end": [end_time],
+                                               "symbol": [self.symbol],
+                                               "type_id": [0 if response.type == 1 else 1],  # 0 - long, 1 - short
+                                               "ds_id": [0 if self.data_source == "mt5" else 1],
+                                               # 0 - mt5, 1 - capital.com
+                                               "strategy_id": [self.strategy.id],
+                                               "size": [response.request.volume],
+                                               "deviation": [response.request.deviation],
+                                               "price_start": [start_price],
+                                               "price_end": [end_price],
+                                               "reason_end": [reason]})
+        else:
+            pass
+
+        if data is not None:
+            if df_trade is None:
+                data["id"] = 0
+                df_trade = data
+
+            else:
+                data["id"] = df_trade["id"].max() + 1
+                df_trade = pd.concat([df_trade, data])
+
+            df_trade.to_csv(file_name, index=False)
+
 
 class MultiIndStrategy:
-    def __init__(self, **kwargs):
-        self.resolution_set: dict = kwargs.get("resolution", {"open": 3, "close": 3})
-        self.pivot_period_set: dict = kwargs.get("pivot_period", {"open": 5, "close": 5})
+    def __init__(self, strategy_id: int, **kwargs):
+        self.id: int = strategy_id
+        self.resolution_set: dict = {"open": kwargs.get("open_config", {}).get("resolution", 3),
+                                     "close": kwargs.get("close_config", {}).get("resolution", 3)}
+        self.pivot_period_set: dict = {"open": kwargs.get("open_config", {}).get("pivot_period", 5),
+                                     "close": kwargs.get("close_config", {}).get("pivot_period", 5)}
         self.pivot_period: int = self.pivot_period_set["open"]
 
         self.searchdiv = "Regular"  # "Regular/Hidden, Hidden
@@ -218,15 +295,21 @@ class MultiIndStrategy:
         self.max_pivot_points: int = kwargs.get("max_pivot_points", 10)
         self.max_bars_to_check: int = kwargs.get("max_bars_to_check", 100)
         self.dont_wait_for_confirmation: bool = kwargs.get("dont_wait_for_confirmation", True)
-        self.indicators: dict = kwargs["entry"]
+        self.indicators_set: dict = {"open": kwargs.get("open_config", {}).get("entry", {}),
+                                     "close": kwargs.get("close_config", {}).get("entry", {})}
+        self.indicators = self.indicators_set["open"]
         self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
         self.last_divergence = {"top": None, "bottom": None}
 
     def set_parameters_by_position(self, has_opened_positions: bool):
         if not has_opened_positions:
+            self.resolution = self.resolution_set["open"]
             self.pivot_period = self.pivot_period_set["open"]
+            self.indicators = self.indicators_set["open"]
         else:
+            self.resolution = self.resolution_set["close"]
             self.pivot_period = self.pivot_period_set["close"]
+            self.indicators = self.indicators_set["close"]
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
@@ -236,19 +319,19 @@ class MultiIndStrategy:
                                          length - startpoint)
 
         return all(np_func(src.iloc[-length - 1: -startpoint - 1], virtual_line_src)) and \
-               all(np_func(close.iloc[-length - 1: -startpoint - 1], virtual_line_close))
+            all(np_func(close.iloc[-length - 1: -startpoint - 1], virtual_line_close))
 
     def divergence_length(self, src: pd.Series, close: pd.Series,
                           pivot_vals: np.array, pivot_positions: np.array,
                           mode: Literal["positive_regular", "negative_regular",
-                                        "positive_hidden", "negative_hidden"]):
+                          "positive_hidden", "negative_hidden"]):
 
         def is_suspected():
             func_src = np.greater if mode in ["positive_regular", "negative_hidden"] else np.less
             func_close = np.less if mode in ["positive_regular", "negative_hidden"] else np.greater
 
             return func_src(src.iloc[-startpoint - 1], src.iloc[-length - 1]) and \
-                   func_close(close.iloc[-startpoint - 1], pivot_vals.iloc[-x - 1])
+                func_close(close.iloc[-startpoint - 1], pivot_vals.iloc[-x - 1])
 
         divlen = 0
 
@@ -367,17 +450,19 @@ class MultiIndStrategy:
                 # if it was a pivot high/ low after last top/ bottom divergence
                 new_divergence = True
                 if self.last_divergence[t] is not None and self.last_divergence[t] >= data.index[0]:
-
                     idx = data.index.get_loc(self.last_divergence[t])
 
                     new_divergence = (pl_positions.iloc[-1] > idx) if t == "bottom" else (ph_positions.iloc[-1] > idx)
 
                 if new_divergence:
                     self.last_divergence[t] = data.index[-1]
-                    return {"top": div_signals["top"].sum(),
-                            "bottom": div_signals["bottom"].sum()}
+                    triggered_idx = np.any(div_signals > 0, axis=1).tolist()
+                    triggered_inds = [idx_name for idx, idx_name in enumerate(indices) if triggered_idx[idx]]
 
-        return {"top": 0, "bottom": 0}
+                    return {"top": div_signals["top"].sum(),
+                            "bottom": div_signals["bottom"].sum(), "triggered": triggered_inds}
+
+        return {"top": 0, "bottom": 0, "triggered": []}
 
     @staticmethod
     def was_price_goes_up(data: pd.DataFrame) -> bool:
