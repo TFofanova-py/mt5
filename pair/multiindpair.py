@@ -287,7 +287,7 @@ class MultiIndStrategy:
                                      "close": kwargs.get("close_config", {}).get("pivot_period", 5)}
         self.pivot_period: int = self.pivot_period_set["open"]
 
-        self.searchdiv = "Regular"  # "Regular/Hidden, Hidden
+        self.divtype: Literal["Regular", "Regular/Hidden", "Hidden"] = kwargs.get("divergence_type", "Regular")
         self.min_number_of_divergence: dict = kwargs.get("min_number_of_divergence",
                                                          {"entry": 1,
                                                           "exit_sl": 1,
@@ -365,11 +365,11 @@ class MultiIndStrategy:
                        ph_vals: np.array, ph_positions: np.array) -> np.array:
         divs = np.zeros(4, dtype=int)
 
-        if self.searchdiv in ["Regular", "Regular/Hidden"]:
+        if self.divtype in ["Regular", "Regular/Hidden"]:
             divs[0] = self.divergence_length(indicator, close, pl_vals, pl_positions, "positive_regular")
             divs[1] = self.divergence_length(indicator, close, ph_vals, ph_positions, "negative_regular")
 
-        if self.searchdiv in ["Hidden", "Regular/Hidden"]:
+        if self.divtype in ["Hidden", "Regular/Hidden"]:
             divs[2] = self.divergence_length(indicator, close, pl_vals, pl_positions, "positive_hidden")
             divs[3] = self.divergence_length(indicator, close, ph_vals, ph_positions, "negative_hidden")
 
