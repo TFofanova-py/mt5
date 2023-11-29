@@ -16,14 +16,14 @@ def wait_for_next_hour(verbose=False) -> None:
     sleep(seconds_to_next_hour)
 
 
-def sleep_with_dummy_requests(p: MultiIndPair, **kwargs):
+def sleep_with_dummy_requests(delay: int, p: MultiIndPair, **kwargs):
     if kwargs.get("capital_conn") is None:
-        sleep(p.resolution * 60)
+        sleep(delay * 60)
 
     else:
         request_freq: int = 9
-        for _ in range(p.resolution // request_freq):
+        for _ in range(delay // request_freq):
             sleep(request_freq * 60)
             p.get_historical_data(**kwargs)  # dummy request to don't lose the api session
 
-        sleep((p.resolution % request_freq) * 60)
+        sleep((delay % request_freq) * 60)

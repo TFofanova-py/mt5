@@ -96,10 +96,10 @@ def rsi(df: pd.DataFrame, period: int = 14, upper_threshold: int = 70, lower_thr
 
 
 def bollinger_bands(df: pd.DataFrame, period: int = 200, mult: float = 2.0) -> pd.DataFrame:
-    df["basis_" + str(mult)] = df["close"].rolling(window=period, min_periods=period).mean()
-    df["dev_" + str(mult)] = mult * df["close"].rolling(window=period, min_periods=period).std(ddof=0)
-    df["upper_" + str(mult)] = df["basis_" + str(mult)] + df["dev_" + str(mult)]
-    df["lower_" + str(mult)] = df["basis_" + str(mult)] - df["dev_" + str(mult)]
+    df["basis"] = df["close"].rolling(window=period, min_periods=1).mean()
+    df["dev"] = mult * df["close"].rolling(window=period, min_periods=1).std(ddof=0)
+    df["upper"] = df["basis"] + df["dev"]
+    df["lower"] = df["basis"] - df["dev"]
     return df
 
 

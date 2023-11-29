@@ -1,10 +1,10 @@
 import os
+import sys
+import traceback
 from datetime import datetime, timezone, timedelta
 import json
 import logging
-
 import pandas as pd
-
 from pair.multiindpair import MultiIndPair
 import MetaTrader5 as mt5
 from time import sleep
@@ -27,24 +27,33 @@ def continuous_trading_pair(p_config: dict, strategy_id: int, **kwargs):
     p = MultiIndPair(mt5, strategy_id, p_config)
 
     while True:
-        broker_positions = p.broker.positions_get(symbol=p.symbol)
-        p.positions = broker_positions if broker_positions is not None else []
-        p.set_parameters_by_position()
-        # if p.was_stop_loss():
-        #     p.save_trade(reason="Stoploss", )
+        try:
+            broker_positions = p.broker.positions_get(symbol=p.symbol)
+            p.positions = broker_positions if broker_positions is not None else []
 
-        data = p.get_historical_data(**kwargs)
+            configs_to_check = p.get_configs_to_check()
+            p.update_last_check_time(configs_to_check)
 
-        if data is None:
-            sleep(p.resolution * 60)
-            continue
+            for cnf in configs_to_check:
+                p.set_parameters_by_config(cnf)
+                data = p.get_historical_data(**kwargs)
 
-        type_action, action_details = p.strategy.get_action(data, p)
+                if data is None:
+                    sleep(p.resolution * 60)
+                    continue
 
-        p.make_action(type_action, action_details)
+                type_action, action_details = p.strategy.get_action(data, p, config_type=cnf["applied_config"])
 
-        print(f"{p.symbol}: Sleep for {p.resolution} minutes")
-        sleep_with_dummy_requests(p, **kwargs)
+                if type_action in cnf["available_actions"]:
+                    p.make_action(type_action, action_details)
+                elif type_action:
+                    print(f"{p.symbol}: Action {type_action} is not available for {cnf['applied_config']} config and {len(p.positions)} positions and {p.strategy.direction} direction")
+
+            time_to_sleep = min([p.strategy.resolution_set[cnf["applied_config"]] for cnf in configs_to_check], default=p.min_resolution)
+            print(f"{p.symbol}: Sleep for {time_to_sleep} minutes")
+            sleep_with_dummy_requests(time_to_sleep, p, **kwargs)
+        except:
+            raise Exception("".join(traceback.format_exception(*sys.exc_info())))
 
 
 def save_strategy(config: dict, file_name: str = "strategies.csv") -> int:

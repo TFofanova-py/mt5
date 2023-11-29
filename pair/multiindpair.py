@@ -8,7 +8,7 @@ from typing import Literal, List, Tuple
 from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
-    pivotlow, pivothigh)
+    pivotlow, pivothigh, bollinger_bands)
 import os
 from MetaTrader5 import OrderSendResult
 
@@ -23,6 +23,7 @@ class MultiIndPair:
             self.datasource_symbol: str = kwargs.get("datasource_symbol")  # symbol of the instrument on datasource
             self.data_source: Literal["mt5", "capital"] = kwargs.get("data_source", "mt5")
             self.resolution: int = self.strategy.resolution_set["open"]
+            self.min_resolution: int = min([v for v in self.strategy.resolution_set.values()])
             self.deal_size: float = float(kwargs.get("deal_size", 1.0))  # volume for opening position must be a float
             self.devaition: int = kwargs.get("deviation",
                                              50)  # max number of points to squeeze when open / close position
@@ -32,19 +33,38 @@ class MultiIndPair:
             mt5_symbol_info = self.broker.symbol_info(self.symbol)
             self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
             self.positions: list = []
+            self.last_check_time: dict = {"open": None, "close": None}
 
         except TypeError as e:
             logging.error(f"Error: {e}")
             print(f"Error: {e}")
 
-    def set_parameters_by_position(self):
-        has_opened_positons = not (self.positions is None or len(self.positions) == 0)
-        self.strategy.set_parameters_by_position(has_opened_positons)
+    def set_parameters_by_config(self, config: dict):
+        key = config["applied_config"]
+        self.resolution = self.strategy.resolution_set[key]
+        self.strategy.pivot_period = self.strategy.pivot_period_set[key]
+        self.strategy.indicators = self.strategy.indicators_set[key]
 
-        if not has_opened_positons:
-            self.resolution = self.strategy.resolution_set["open"]
-        else:
-            self.resolution = self.strategy.resolution_set["close"]
+    def get_configs_to_check(self) -> List[dict]:
+        has_opened_positions = not (self.positions is None or len(self.positions) == 0)
+        is_time_to_check = {
+            k: True if v is None else (v - datetime.datetime.now()).seconds // 60 >= self.strategy.resolution_set[k] for k, v
+            in self.last_check_time.items()}
+        result = []
+        if not has_opened_positions and is_time_to_check["open"]:
+            result.append({"applied_config": "open",
+                           "available_actions": [self.broker.ORDER_TYPE_BUY, self.broker.ORDER_TYPE_SELL]})
+        if has_opened_positions and is_time_to_check["close"]:
+            result.append({"applied_config": "close",
+                           "available_actions": [self.broker.TRADE_ACTION_SLTP, (self.positions[0].type + 1) % 2]})
+        if has_opened_positions and self.strategy.direction == "swing" and is_time_to_check["open"]:
+            result.append({"applied_config": "open",
+                           "available_actions": [self.broker.TRADE_ACTION_SLTP, self.positions[0].type]})
+        return result
+
+    def update_last_check_time(self, configs: List[dict]):
+        for k in [cnf["applied_config"] for cnf in configs]:
+            self.last_check_time[k] = datetime.datetime.now()
 
     def get_historical_data(self, **kwargs):
 
@@ -187,7 +207,8 @@ class MultiIndPair:
             assert "price" in action_details, f"{self.symbol}, Price is required for action type {type_action}"
             price = action_details["price"]
 
-            if len(self.positions) == 0:
+            if len(self.positions) == 0 or (
+                    self.strategy.direction == "swing" and self.positions[0].type == type_action):
                 response = self.create_position(price=price, type_action=type_action)
                 self.resolution = self.strategy.resolution_set["close"]
 
@@ -284,7 +305,7 @@ class MultiIndStrategy:
         self.resolution_set: dict = {"open": kwargs.get("open_config", {}).get("resolution", 3),
                                      "close": kwargs.get("close_config", {}).get("resolution", 3)}
         self.pivot_period_set: dict = {"open": kwargs.get("open_config", {}).get("pivot_period", 5),
-                                     "close": kwargs.get("close_config", {}).get("pivot_period", 5)}
+                                       "close": kwargs.get("close_config", {}).get("pivot_period", 5)}
         self.pivot_period: int = self.pivot_period_set["open"]
 
         self.divtype: Literal["Regular", "Regular/Hidden", "Hidden"] = kwargs.get("divergence_type", "Regular")
@@ -298,18 +319,9 @@ class MultiIndStrategy:
         self.indicators_set: dict = {"open": kwargs.get("open_config", {}).get("entry", {}),
                                      "close": kwargs.get("close_config", {}).get("entry", {})}
         self.indicators = self.indicators_set["open"]
-        self.direction: Literal["low-long", "high-short", "bi"] = kwargs.get("direction", "low-long")
-        self.last_divergence = {"top": None, "bottom": None}
-
-    def set_parameters_by_position(self, has_opened_positions: bool):
-        if not has_opened_positions:
-            self.resolution = self.resolution_set["open"]
-            self.pivot_period = self.pivot_period_set["open"]
-            self.indicators = self.indicators_set["open"]
-        else:
-            self.resolution = self.resolution_set["close"]
-            self.pivot_period = self.pivot_period_set["close"]
-            self.indicators = self.indicators_set["close"]
+        self.direction: Literal["low-long", "high-short", "bi", "swing"] = kwargs.get("direction", "low-long")
+        self.last_divergence = {"open": {"top": None, "bottom": None}, "close": {"top": None, "bottom": None}}
+        self.bollinger = kwargs.get("open_config", {}).get("bollinger")
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
@@ -375,7 +387,7 @@ class MultiIndStrategy:
 
         return divs
 
-    def count_divergence(self, data: pd.DataFrame) -> dict:
+    def count_divergence(self, data: pd.DataFrame, config_type: Literal["open", "close"]) -> dict:
 
         ind_ser: List[pd.Series] = []
         indices: List[str] = []
@@ -433,7 +445,6 @@ class MultiIndStrategy:
 
         n_indicators = all_divergences.shape[0]
 
-        # div_types: 0 - bottom (div0 and div2), 1 - top (div1 and div3)
         div_types = (np.arange(4).reshape(1, -1) % 2) * np.ones((n_indicators, 1)).astype(int)
 
         top_mask = (div_types == 1)
@@ -449,13 +460,13 @@ class MultiIndStrategy:
             if div_signals[t].sum() > 0:
                 # if it was a pivot high/ low after last top/ bottom divergence
                 new_divergence = True
-                if self.last_divergence[t] is not None and self.last_divergence[t] >= data.index[0]:
-                    idx = data.index.get_loc(self.last_divergence[t])
+                if self.last_divergence[config_type][t] is not None and self.last_divergence[config_type][t] >= data.index[0]:
+                    idx = data.index.get_loc(self.last_divergence[config_type][t])
 
                     new_divergence = (pl_positions.iloc[-1] > idx) if t == "bottom" else (ph_positions.iloc[-1] > idx)
 
                 if new_divergence:
-                    self.last_divergence[t] = data.index[-1]
+                    self.last_divergence[config_type][t] = data.index[-1]
                     triggered_idx = np.any(div_signals > 0, axis=1).tolist()
                     triggered_inds = [idx_name for idx, idx_name in enumerate(indices) if triggered_idx[idx]]
 
@@ -472,23 +483,36 @@ class MultiIndStrategy:
             return True
         return False
 
-    def get_action(self, data: pd.DataFrame, pair: MultiIndPair) -> Tuple[int, dict]:
-        divergences_cnt = self.count_divergence(data)
+    def get_bollinger_conditions(self, data: pd.DataFrame) -> Tuple[bool, bool]:
+        price = data["close"].iloc[-1]
+        if self.bollinger is None:
+            return True, True
+        params = self.bollinger
+        ind_bollinger = bollinger_bands(data, **params).iloc[-1][["upper", "lower"]]
+        return price < ind_bollinger["lower"], price > ind_bollinger["upper"]
 
-        if divergences_cnt["top"] + divergences_cnt["bottom"] > 0:
-            print(f"{pair.symbol}: divergences {divergences_cnt}")
-            logging.info(f"{data.index[-1]}, number divergences: {divergences_cnt}")
+    def get_action(self, data: pd.DataFrame, pair: MultiIndPair, config_type: Literal["open", "close"]) -> Tuple[int, dict]:
+        divergences_cnt = self.count_divergence(data, config_type=config_type)
 
         type_action = None
         details = {"curr_time": data.index[-1]}
+        price = data["close"].iloc[-1]
 
-        if self.direction in ["low-long", "bi"] and \
+        bollinger_cond_lower, bollinger_cond_upper = self.get_bollinger_conditions(data)
+
+        if divergences_cnt["top"] + divergences_cnt["bottom"] > 0:
+            print(f"{pair.symbol}: divergences {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
+            logging.info(f"{data.index[-1]}, divergences: {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
+
+        if self.direction in ["low-long", "bi", "swing"] and \
                 divergences_cnt["bottom"] >= self.min_number_of_divergence["entry"] and \
+                bollinger_cond_lower and \
                 len(pair.positions) == 0:
             type_action = pair.broker.ORDER_TYPE_BUY
 
-        elif self.direction in ["high-short", "bi"] and \
+        elif self.direction in ["high-short", "bi", "swing"] and \
                 divergences_cnt["top"] >= self.min_number_of_divergence["entry"] and \
+                bollinger_cond_upper and \
                 len(pair.positions) == 0:
             type_action = pair.broker.ORDER_TYPE_SELL
 
@@ -498,14 +522,24 @@ class MultiIndStrategy:
             opposite_direction_divergences = divergences_cnt["top"] if pair.positions[0].type == 0 else divergences_cnt[
                 "bottom"]
 
-            if same_direction_divergences >= self.min_number_of_divergence["exit_sl"] or \
+            print(pair.symbol, self.direction, "len pos", len(pair.positions),
+                  "same direction", same_direction_divergences, "opposite direction", opposite_direction_divergences)
+
+            if (self.direction != "swing" and same_direction_divergences >= self.min_number_of_divergence["exit_sl"]) or \
                     opposite_direction_divergences >= self.min_number_of_divergence["exit_tp"]:
                 # close position
                 type_action = (pair.positions[0].type + 1) % 2
 
+            elif self.direction == "swing" and same_direction_divergences >= self.min_number_of_divergence["entry"]:
+                bollinger_cond = (pair.positions[0].type == 0 and bollinger_cond_lower) or (
+                        pair.positions[0].type == 1 and bollinger_cond_upper)
+                print(f"{pair.symbol}: bollinger common: {bollinger_cond}")
+                if bollinger_cond:
+                    # open another position
+                    type_action = pair.positions[0].type
+
             else:
                 # modify stop-loss
-                price = data["close"].iloc[-1]
                 price_goes_up = self.was_price_goes_up(data)
                 new_sls = None
 
