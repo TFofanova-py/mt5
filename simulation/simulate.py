@@ -6,16 +6,16 @@ import logging
 from itertools import islice
 import numpy as np
 
-from pair.pair import Pair
+from pair.multiindpair import MultiIndPair
 from pair.constants import N_DOWN_PERIODS
-from pair.yahoo_utils import get_yahoo_data
+from pair.external_history import get_yahoo_data
 from collections import namedtuple
 import argparse
 
 Position = namedtuple("Position", ["identifier", "time", "price", "size"])
 
 
-def was_stoploss(p: Pair, bal: dict) -> bool:
+def was_stoploss(p: MultiIndPair, bal: dict) -> bool:
     # check for stoploss on the last step
 
     if bal["position"]["size"] > 0:
@@ -26,7 +26,7 @@ def was_stoploss(p: Pair, bal: dict) -> bool:
     return False
 
 
-def simulation_step(p: Pair, bal: dict) -> Tuple[datetime, int, dict]:
+def simulation_step(p: MultiIndPair, bal: dict) -> Tuple[datetime, int, dict]:
     t_last = p.prices.index[-1]
     info = {}
 
@@ -41,7 +41,7 @@ def simulation_step(p: Pair, bal: dict) -> Tuple[datetime, int, dict]:
     return t_last, signal, info
 
 
-def update_pair(p: Pair, bal: dict, signal: int) -> Pair:
+def update_pair(p: MultiIndPair, bal: dict, signal: int) -> MultiIndPair:
     if signal in [-2, -4]:
         if p.idx_down_periods < len(N_DOWN_PERIODS) - 1:  # n_down_periods [3, 4, inf]
             p.idx_down_periods = p.idx_down_periods + 1
@@ -64,7 +64,7 @@ def update_pair(p: Pair, bal: dict, signal: int) -> Pair:
     return p
 
 
-def update_balance(p: Pair, bal: dict, signal: int, info: dict = None) -> dict:
+def update_balance(p: MultiIndPair, bal: dict, signal: int, info: dict = None) -> dict:
     t_last = p.prices.index[-1]
     curr_position = bal["position"]["size"]
 
@@ -92,7 +92,7 @@ def update_balance(p: Pair, bal: dict, signal: int, info: dict = None) -> dict:
     return bal
 
 
-def early_stop(bal: dict, p: Pair, max_neg_inrow: int = 5, min_total_yield: float = -0.5) -> bool:
+def early_stop(bal: dict, p: MultiIndPair, max_neg_inrow: int = 5, min_total_yield: float = -0.5) -> bool:
     if bal["n_neg_inrow"] == max_neg_inrow:
         return True
 
@@ -103,7 +103,7 @@ def early_stop(bal: dict, p: Pair, max_neg_inrow: int = 5, min_total_yield: floa
 
 
 def run_simulate(**params) -> Union[Tuple[float, dict], None]:
-    pair = Pair(params)
+    pair = MultiIndPair(params)
 
     actions_dict = {-4: "down trend",
                     -3: "unclear trend",
@@ -179,7 +179,7 @@ if __name__ == '__main__':
 
     strategy_config = json.load(open("../config.json"))
 
-    pair = Pair(strategy_config)
+    pair = MultiIndPair(strategy_config)
 
     logging.basicConfig(level=logging.INFO,
                         format='%(message)s',

@@ -28,8 +28,7 @@ def continuous_trading_pair(p_config: dict, strategy_id: int, **kwargs):
 
     while True:
         try:
-            broker_positions = p.broker.positions_get(symbol=p.symbol)
-            p.positions = broker_positions if broker_positions is not None else []
+            p.update_positions()
 
             configs_to_check = p.get_configs_to_check()
             p.update_last_check_time(configs_to_check)
@@ -46,11 +45,14 @@ def continuous_trading_pair(p_config: dict, strategy_id: int, **kwargs):
 
                 if type_action in cnf["available_actions"]:
                     p.make_action(type_action, action_details)
-                elif type_action:
-                    print(f"{p.symbol}: Action {type_action} is not available for {cnf['applied_config']} config and {len(p.positions)} positions and {p.strategy.direction} direction")
+                    sleep(5)
+                    p.update_positions()
+
+                elif type_action is not None:
+                    print(f"{datetime.now().time().isoformat(timespec='minutes')} {p.symbol}: Action {type_action} is not available for {cnf['applied_config']} config and {len(p.positions)} positions and {p.strategy.direction} direction")
 
             time_to_sleep = min([p.strategy.resolution_set[cnf["applied_config"]] for cnf in configs_to_check], default=p.min_resolution)
-            print(f"{p.symbol}: Sleep for {time_to_sleep} minutes")
+            print(f"{datetime.now().time().isoformat(timespec='minutes')} {p.symbol}: Sleep for {time_to_sleep} minutes")
             sleep_with_dummy_requests(time_to_sleep, p, **kwargs)
         except:
             raise Exception("".join(traceback.format_exception(*sys.exc_info())))
@@ -120,6 +122,11 @@ def save_strategy(config: dict, file_name: str = "strategies.csv") -> int:
     return int(data["id"])
 
 
+def print_error(er):
+    if str(er) != "KeyboardInterrupt":
+        print(er)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config_file", type=str)
@@ -153,7 +160,7 @@ if __name__ == "__main__":
                                 "direction": params["direction"]})
 
             pool.apply_async(continuous_trading_pair, args=(pair_config, strategy_id), kwds=kws,
-                             error_callback=print)
+                             error_callback=print_error)
 
     except KeyboardInterrupt:
         print("Caught KeyboardInterrupt")

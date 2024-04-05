@@ -1,7 +1,7 @@
 import json
 import argparse
 from itertools import product
-from pair.pair import parse_du
+from pair.multiindpair import parse_du
 
 
 if __name__ == "__main__":

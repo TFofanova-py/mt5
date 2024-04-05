@@ -1,5 +1,6 @@
 import datetime
 from datetime import timedelta
+from time import sleep
 import logging
 import pandas as pd
 import numpy as np
@@ -11,6 +12,7 @@ from .ta_utils import (
     pivotlow, pivothigh, bollinger_bands)
 import os
 from MetaTrader5 import OrderSendResult
+from .external_history import get_yahoo_data, get_twelvedata
 
 
 class MultiIndPair:
@@ -21,7 +23,7 @@ class MultiIndPair:
             self.strategy = MultiIndStrategy(strategy_id, **kwargs)
             self.symbol: str = kwargs["symbol"]  # symbol of the instrument MT5
             self.datasource_symbol: str = kwargs.get("datasource_symbol")  # symbol of the instrument on datasource
-            self.data_source: Literal["mt5", "capital"] = kwargs.get("data_source", "mt5")
+            self.data_source: Literal["mt5", "capital", "yahoo", "twelvedata"] = kwargs.get("data_source", "mt5")
             self.resolution: int = self.strategy.resolution_set["open"]
             self.min_resolution: int = min([v for v in self.strategy.resolution_set.values()])
             self.deal_size: float = float(kwargs.get("deal_size", 1.0))  # volume for opening position must be a float
@@ -66,6 +68,11 @@ class MultiIndPair:
         for k in [cnf["applied_config"] for cnf in configs]:
             self.last_check_time[k] = datetime.datetime.now()
 
+    def update_positions(self):
+        self.positions = self.broker.positions_get(symbol=self.symbol)
+        if self.positions is None:
+            self.positions = []
+
     def get_historical_data(self, **kwargs):
 
         numpoints = kwargs.get("numpoints", None)
@@ -93,7 +100,7 @@ class MultiIndPair:
                 rates = self.broker.copy_rates_from_pos(self.symbol, interval, 0, numpoints)
 
                 if rates is None:
-                    print(f"{self.symbol}: Can't get the historical data")
+                    print(f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {self.symbol}: Can't get the historical data")
                     return None
 
                 curr_prices = pd.DataFrame(rates)
@@ -122,6 +129,26 @@ class MultiIndPair:
                                               "lowPrice": "low", "openPrice": "open",
                                               "lastTradedVolume": "volume"}, axis=1)
             return curr_prices
+
+        elif self.data_source =="yahoo":
+            interval: str = f"{self.resolution}m" if self.resolution < 60 else (f"{self.resolution//60}h" if self.resolution < 24 * 60 else f"{self.resolution//(24*60)}d")
+            assert interval in ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d"], \
+                f"{interval} is not valid for yfinance"
+            assert self.datasource_symbol is not None, "datasource_symbol mustn't be None"
+
+            y_data = get_yahoo_data(self.datasource_symbol, interval=interval, numpoints=numpoints)
+            seconds_from_last_fixed_point = (y_data.index[-1] - y_data.index[-2]).seconds
+            tol = 30  # in seconds
+            if seconds_from_last_fixed_point < tol:
+                return y_data.iloc[:-1]
+            elif seconds_from_last_fixed_point < self.resolution * 60:
+                sleep(self.resolution * 60 + tol // 3 - seconds_from_last_fixed_point)
+                return get_yahoo_data(self.datasource_symbol, interval=interval, numpoints=numpoints).iloc[:-1]
+            else:
+                print(f"Data for {self.symbol}, {self.datasource_symbol} is weird")
+
+        elif self.data_source == "twelvedata":
+            return get_twelvedata(self.datasource_symbol, self.resolution, numpoints)
 
     def create_position(self, price: float, type_action: int, sl: float = None):
         if sl is None:
@@ -154,27 +181,34 @@ class MultiIndPair:
 
         return self.broker.order_send(request)
 
-    def close_opened_position(self, price: float, type_action: str, identifiers: List[int] = None) -> list:
+    def close_opened_position(self, price: float, type_action: str, identifiers: List[int] = None,
+                              positive_only: bool = False) -> list:
         if identifiers is None:
             identifiers = [pos.identifier for pos in self.broker.positions_get(symbol=self.symbol)]
 
+        profits = [pos.profit for pos in self.broker.positions_get(symbol=self.symbol)
+                       if pos.identifier in identifiers]
+
         responses = []
-        for position in identifiers:
-            request = {
-                "action": self.broker.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": self.deal_size,
-                "deviation": self.devaition,
-                "type": type_action,
-                "position": position,
-                "price": price,
-                "comment": "python script close",
-                "type_time": self.broker.ORDER_TIME_GTC,
-                "type_filling": self.broker.ORDER_FILLING_IOC
-            }
-            # check order before placement
-            # check_result = broker.order_check(request)
-            responses.append(self.broker.order_send(request))
+        for i, position in enumerate(identifiers):
+            if not positive_only or profits[i] > 0:
+                request = {
+                    "action": self.broker.TRADE_ACTION_DEAL,
+                    "symbol": self.symbol,
+                    "volume": self.deal_size,
+                    "deviation": self.devaition,
+                    "type": type_action,
+                    "position": position,
+                    "price": price,
+                    "comment": "python script close",
+                    "type_time": self.broker.ORDER_TIME_GTC,
+                    "type_filling": self.broker.ORDER_FILLING_IOC
+                }
+                # check order before placement
+                # check_result = broker.order_check(request)
+                responses.append(self.broker.order_send(request))
+            else:
+                responses.append(f"Don't close negative position {position}")
 
         return responses
 
@@ -187,15 +221,18 @@ class MultiIndPair:
 
         responses = []
         for position, new_sl in zip(identifiers, new_sls):
-            request = {
-                "action": self.broker.TRADE_ACTION_SLTP,
-                "symbol": self.symbol,
-                "sl": new_sl,
-                "position": position
-            }
-            # check order before placement
-            # check_result = broker.order_check(request)
-            responses.append(self.broker.order_send(request))
+            if new_sl:
+                request = {
+                    "action": self.broker.TRADE_ACTION_SLTP,
+                    "symbol": self.symbol,
+                    "sl": new_sl,
+                    "position": position
+                }
+                # check order before placement
+                # check_result = broker.order_check(request)
+                responses.append(self.broker.order_send(request))
+            else:
+                responses.append(None)
 
         return responses
 
@@ -206,6 +243,7 @@ class MultiIndPair:
         if type_action in [self.broker.ORDER_TYPE_BUY, self.broker.ORDER_TYPE_SELL]:
             assert "price" in action_details, f"{self.symbol}, Price is required for action type {type_action}"
             price = action_details["price"]
+            positive_only = action_details.get("positive_only", False)
 
             if len(self.positions) == 0 or (
                     self.strategy.direction == "swing" and self.positions[0].type == type_action):
@@ -216,7 +254,7 @@ class MultiIndPair:
                 print(response)
 
             else:
-                responses = self.close_opened_position(price=price, type_action=type_action)
+                responses = self.close_opened_position(price=price, type_action=type_action, positive_only=positive_only)
                 print(responses)
                 logging.info(f"{curr_time}, close position: {responses}")
                 # self.save_trade(responses, file_name="../trades.csv")
@@ -226,7 +264,8 @@ class MultiIndPair:
             assert "new_sls" in action_details, f"new_sls is required for modifying SL"
             new_sls = action_details["new_sls"]
             responses = self.modify_sl(new_sls)
-            print("modify stop-loss", responses)
+            if any(responses):
+                print("modify stop-loss", responses)
             logging.info(f"{curr_time}, modify position: {responses}")
 
     def was_stoploss(self):
@@ -320,8 +359,13 @@ class MultiIndStrategy:
                                      "close": kwargs.get("close_config", {}).get("entry", {})}
         self.indicators = self.indicators_set["open"]
         self.direction: Literal["low-long", "high-short", "bi", "swing"] = kwargs.get("direction", "low-long")
+        self.entry_price_higher_than = kwargs.get("entry_price_higher_than")
+        self.entry_price_lower_than = kwargs.get("entry_price_lower_than")
+        self.exit_target = kwargs.get("exit_target")
         self.last_divergence = {"open": {"top": None, "bottom": None}, "close": {"top": None, "bottom": None}}
         self.bollinger = kwargs.get("open_config", {}).get("bollinger")
+        self.close_positive_only: bool = kwargs.get("close_config", {}).get("positive_only", False)
+        self.next_position_bol_check: bool = kwargs.get("open_config", {}).get("next_position_bol_check", True)
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
@@ -501,19 +545,25 @@ class MultiIndStrategy:
         bollinger_cond_lower, bollinger_cond_upper = self.get_bollinger_conditions(data)
 
         if divergences_cnt["top"] + divergences_cnt["bottom"] > 0:
-            print(f"{pair.symbol}: divergences {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
+            print(f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {pair.symbol}: divergences {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
             logging.info(f"{data.index[-1]}, divergences: {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
 
         if self.direction in ["low-long", "bi", "swing"] and \
                 divergences_cnt["bottom"] >= self.min_number_of_divergence["entry"] and \
                 bollinger_cond_lower and \
-                len(pair.positions) == 0:
+                len(pair.positions) == 0 and \
+                (self.direction != "low-long" or
+                 self.entry_price_lower_than is None or
+                 (self.entry_price_lower_than and price < self.entry_price_lower_than)):
             type_action = pair.broker.ORDER_TYPE_BUY
 
         elif self.direction in ["high-short", "bi", "swing"] and \
                 divergences_cnt["top"] >= self.min_number_of_divergence["entry"] and \
                 bollinger_cond_upper and \
-                len(pair.positions) == 0:
+                len(pair.positions) == 0 and \
+                (self.direction != "high-short" or
+                 self.entry_price_higher_than is None or
+                 (self.entry_price_higher_than and price > self.entry_price_higher_than)):
             type_action = pair.broker.ORDER_TYPE_SELL
 
         elif len(pair.positions) > 0:
@@ -522,22 +572,29 @@ class MultiIndStrategy:
             opposite_direction_divergences = divergences_cnt["top"] if pair.positions[0].type == 0 else divergences_cnt[
                 "bottom"]
 
-            print(pair.symbol, self.direction, "len pos", len(pair.positions),
+            print(datetime.datetime.now().time().isoformat(timespec='minutes'), pair.symbol, self.direction, "len pos", len(pair.positions),
                   "same direction", same_direction_divergences, "opposite direction", opposite_direction_divergences)
 
-            if (self.direction != "swing" and same_direction_divergences >= self.min_number_of_divergence["exit_sl"]) or \
-                    opposite_direction_divergences >= self.min_number_of_divergence["exit_tp"]:
+            if ((self.direction != "swing" and same_direction_divergences >= self.min_number_of_divergence["exit_sl"]) or \
+                    opposite_direction_divergences >= self.min_number_of_divergence["exit_tp"]) and \
+                    (self.exit_target is None or (self.direction == "high-short") * (price < self.exit_target)
+                     or (self.direction == "low-long") * (price > self.exit_target)):
                 # close position
                 type_action = (pair.positions[0].type + 1) % 2
+                details.update({"positive_only": self.close_positive_only})
 
             elif self.direction == "swing" and same_direction_divergences >= self.min_number_of_divergence["entry"]:
-                bollinger_cond = (pair.positions[0].type == 0 and bollinger_cond_lower) or (
-                        pair.positions[0].type == 1 and bollinger_cond_upper)
-                print(f"{pair.symbol}: bollinger common: {bollinger_cond}")
-                if bollinger_cond:
+                bollinger_cond = None
+                if self.next_position_bol_check:
+                    bollinger_cond = (pair.positions[0].type == 0 and bollinger_cond_lower) or (
+                            pair.positions[0].type == 1 and bollinger_cond_upper)
+                    print(f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {pair.symbol}: bollinger common: {bollinger_cond}")
+
+                if not self.next_position_bol_check or bollinger_cond:
                     # open another position
                     type_action = pair.positions[0].type
-
+                    print(
+                        f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {pair.symbol}: type_action: {type_action}")
             else:
                 # modify stop-loss
                 price_goes_up = self.was_price_goes_up(data)
@@ -546,13 +603,11 @@ class MultiIndStrategy:
                 if pair.positions[0].type == 0 and price_goes_up:
                     # if long and price goes up, move sl up
                     new_sl = round(price * pair.stop_coefficient, abs(int(np.log10(pair.trade_tick_size))))
-                    if new_sl > pair.positions[0].sl:
-                        new_sls = [new_sl]
+                    new_sls = [new_sl if x.sl < new_sl else None for x in pair.positions]
                 elif pair.positions[0].type == 1 and not price_goes_up:
                     # if short and price goes down, move sl down
                     new_sl = round(price * (2. - pair.stop_coefficient), abs(int(np.log10(pair.trade_tick_size))))
-                    if new_sl < pair.positions[0].sl:
-                        new_sls = [new_sl]
+                    new_sls = [new_sl if x.sl > new_sl else None for x in pair.positions]
 
                 if new_sls is not None:
                     type_action = pair.broker.TRADE_ACTION_SLTP

@@ -7,11 +7,12 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from time import sleep
 import logging
-from pair.pair import Pair
+from pair.multiindpair import MultiIndPair
+from utils import wait_for_next_hour
 import argparse
 
 
-def create_position(broker, pair: Pair, sl: float = None):
+def create_position(broker, pair: MultiIndPair, sl: float = None):
     curr_price = pair.get_curr_price()
 
     if sl is None:
@@ -67,7 +68,7 @@ def close_opened_position(broker, pair, identifiers: List[int] = None) -> list:
     return responses
 
 
-def make_ichimoku_trade(broker, pair: Pair, verbose: bool = True):
+def make_ichimoku_trade(broker, pair: MultiIndPair, verbose: bool = True):
     pass
 
 
@@ -142,17 +143,6 @@ def print_opened_pos(broker, pair):
         logging.info(f"You have {len(opened_pos)} opened positions in {pair.symbol}")
 
 
-def wait_for_next_hour(verbose=False) -> None:
-    now = datetime.now()
-    seconds_to_next_hour = 60 * 60 - now.minute * 60 - now.second + 1
-
-    msg = f"waiting for {seconds_to_next_hour} seconds for the next hour"
-    logging.info(msg)
-    if verbose:
-        print(msg)
-
-    sleep(seconds_to_next_hour)
-
 
 def trade_const_instrument(broker, pair):
     print_opened_pos(broker, pair)
@@ -208,7 +198,7 @@ if __name__ == '__main__':
         if check_strategy_config(config):
             logging.info(f"Using instrument {config.get('symbol')}")
 
-            pair_to_trade = Pair(config)
+            pair_to_trade = MultiIndPair(config)
             if pair_to_trade is not None:
 
                 if not args.immediately:
