@@ -365,7 +365,7 @@ class MultiIndStrategy:
         self.last_divergence = {"open": {"top": None, "bottom": None}, "close": {"top": None, "bottom": None}}
         self.bollinger = kwargs.get("open_config", {}).get("bollinger")
         self.close_positive_only: bool = kwargs.get("close_config", {}).get("positive_only", False)
-        self.next_position_bol_check: bool = kwargs.get("open_config", {}).get("next_position_bol_check", True)
+        self.next_position_bol_check: bool = kwargs.get("open_config", {}).get("next_position_bol_check", False)
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
