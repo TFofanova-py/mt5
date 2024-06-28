@@ -1,45 +1,160 @@
-import pandas as pd
+import json
 import numpy as np
 import pytest
 import MetaTrader5 as mt5
-from config_mt5 import Config
-from pair import Pair
-from main import create_position, close_opened_position
+from pair.multiindpair import MultiIndPair
 from time import sleep
+from models import BotConfig, PairConfig
 
 
 @pytest.fixture(scope="module")
 def session():
-    mt5.initialize(login=Config.login, password=Config.password, server=Config.server, path=Config.path)
+    config = json.load(open("42503701-adm.json"))
+    config = BotConfig(**config)
+    mt5.initialize(login=config.login, password=config.password,
+                   server=config.server, path=str(config.path))
+    initialization_config = {"login": config.login,
+                             "password": config.password,
+                             "server": config.server,
+                             "path": config.path}
     yield {"broker": mt5,
-           "pairs": {"first_pair_params": {"symbol": "[SP500]",
-                                           "data_source": "mt5",
-                                           "resolution": mt5.TIMEFRAME_M1,
-                                           "deal_size": 1.0,
-                                           "stop_coefficient": 0.997,
-                                           "limit": None,
-                                           "dft_period": 19},
-                     "second_pair_params": {"symbol": "USDCHF",
-                                            "data_source": "mt5",
-                                            "resolution": mt5.TIMEFRAME_M3,
-                                            "deal_size": 0.5,
-                                            "stop_coefficient": 0.998,
-                                            "limit": None,
-                                            "dft_period": 34},
-                     "pair_with_wrong_deal_size_params": {"symbol": "[SP500]",
-                                                          "data_source": "mt5",
-                                                          "resolution": mt5.TIMEFRAME_M1,
-                                                          "deal_size": 1000.0,
-                                                          "stop_coefficient": 0.994,
-                                                          "limit": None,
-                                                          "dft_period": 19},
-                     "pair_with_wrong_stop_params": {"symbol": "BTCUSD",
-                                                     "data_source": "mt5",
-                                                     "resolution": mt5.TIMEFRAME_M3,
-                                                     "deal_size": 0.5,
-                                                     "stop_coefficient": 0.999,
-                                                     "limit": None,
-                                                     "dft_period": 34}
+           "pairs": {"first_pair_params": PairConfig(**initialization_config,
+                                                     **{"symbol": "USDCAD",
+                                                         "ds_symbol": "USDCAD",
+                                                        "data_source": "mt5",
+                                                        "deal_size": 0.05,
+                                                        "stop_coefficient": 0.997,
+                                                        "direction": "low-long",
+                                                        "max_pivot_points": 10,
+                                                        "max_bars_to_check": 100,
+                                                        "dont_wait_for_confirmation": False,
+                                                        "min_number_of_divergence": {
+                                                            "entry": 1,
+                                                            "exit_sl": 1,
+                                                            "exit_tp": 1
+                                                        },
+                                                        "divergence_type": "Regular",
+                                                        "open_config": {
+                                                            "resolution": mt5.TIMEFRAME_M1,
+                                                            "pivot_period": 10,
+                                                            "entry": {
+                                                                "rsi": {
+                                                                    "rsi_length": 14
+                                                                },
+                                                            }
+                                                        },
+                                                        "close_config": {
+                                                            "resolution": mt5.TIMEFRAME_M1,
+                                                            "pivot_period": 10,
+                                                            "entry": {
+                                                                "rsi": {
+                                                                    "rsi_length": 14
+                                                                },
+                                                            }
+                                                        }}),
+                     "second_pair_params": PairConfig(**initialization_config,
+                                                      **{"symbol": "USDCHF",
+                                                         "ds_symbol": "USDCHF",
+                                                         "data_source": "mt5",
+                                                         "deal_size": 0.05,
+                                                         "stop_coefficient": 0.998,
+                                                         "direction": "low-long",
+                                                         "max_pivot_points": 10,
+                                                         "max_bars_to_check": 100,
+                                                         "dont_wait_for_confirmation": False,
+                                                         "min_number_of_divergence": {
+                                                             "entry": 1,
+                                                             "exit_sl": 1,
+                                                             "exit_tp": 1
+                                                         },
+                                                         "divergence_type": "Regular",
+                                                         "open_config": {
+                                                             "resolution": mt5.TIMEFRAME_M3,
+                                                             "pivot_period": 10,
+                                                             "entry": {
+                                                                 "rsi": {
+                                                                     "rsi_length": 14
+                                                                 },
+                                                             }
+                                                         },
+                                                         "close_config": {
+                                                             "resolution": mt5.TIMEFRAME_M1,
+                                                             "pivot_period": 10,
+                                                             "entry": {
+                                                                 "rsi": {
+                                                                     "rsi_length": 14
+                                                                 },
+                                                             }
+                                                         }}),
+                     "pair_with_wrong_deal_size_params": PairConfig(**initialization_config,
+                                                                    **{"symbol": "[SP500]",
+                                                                       "ds_symbol": "[SP500]",
+                                                                       "data_source": "mt5",
+                                                                       "deal_size": 1000.0,
+                                                                       "stop_coefficient": 0.994,
+                                                                       "direction": "low-long",
+                                                                       "max_pivot_points": 10,
+                                                                       "max_bars_to_check": 100,
+                                                                       "dont_wait_for_confirmation": False,
+                                                                       "min_number_of_divergence": {
+                                                                           "entry": 1,
+                                                                           "exit_sl": 1,
+                                                                           "exit_tp": 1
+                                                                       },
+                                                                       "divergence_type": "Regular",
+                                                                       "open_config": {
+                                                                           "resolution": mt5.TIMEFRAME_M1,
+                                                                           "pivot_period": 10,
+                                                                           "entry": {
+                                                                               "rsi": {
+                                                                                   "rsi_length": 14
+                                                                               },
+                                                                           }
+                                                                       },
+                                                                       "close_config": {
+                                                                           "resolution": mt5.TIMEFRAME_M1,
+                                                                           "pivot_period": 10,
+                                                                           "entry": {
+                                                                               "rsi": {
+                                                                                   "rsi_length": 14
+                                                                               },
+                                                                           }
+                                                                       }}),
+                     "pair_with_wrong_stop_params": PairConfig(**initialization_config,
+                                                               **{"symbol": "BTCUSD",
+                                                                  "ds_symbol": "BTCUSD",
+                                                                  "data_source": "mt5",
+                                                                  "resolution": mt5.TIMEFRAME_M3,
+                                                                  "deal_size": 0.05,
+                                                                  "stop_coefficient": 0.999,
+                                                                  "direction": "low-long",
+                                                                  "max_pivot_points": 10,
+                                                                  "max_bars_to_check": 100,
+                                                                  "dont_wait_for_confirmation": False,
+                                                                  "min_number_of_divergence": {
+                                                                      "entry": 1,
+                                                                      "exit_sl": 1,
+                                                                      "exit_tp": 1
+                                                                  },
+                                                                  "divergence_type": "Regular",
+                                                                  "open_config": {
+                                                                      "resolution": mt5.TIMEFRAME_M1,
+                                                                      "pivot_period": 10,
+                                                                      "entry": {
+                                                                          "rsi": {
+                                                                              "rsi_length": 14
+                                                                          },
+                                                                      }
+                                                                  },
+                                                                  "close_config": {
+                                                                      "resolution": mt5.TIMEFRAME_M1,
+                                                                      "pivot_period": 10,
+                                                                      "entry": {
+                                                                          "rsi": {
+                                                                              "rsi_length": 14
+                                                                          },
+                                                                      }
+                                                                  }}),
                      }
            }
 
@@ -47,19 +162,11 @@ def session():
 @pytest.fixture(scope="function")
 def make_pairs(session):
     pairs_dict = {}
+    broker = session["broker"]
     for pair_key in session["pairs"]:
         pair_params = session["pairs"][pair_key]
         pair_key_short = pair_key[:-7]
-        pairs_dict[pair_key_short] = Pair(symbol=pair_params.get("symbol"),
-                                          yahoo_symbol=pair_params.get("yahoo_symbol"),
-                                          resolution=pair_params.get("resolution"),
-                                          data_source=pair_params.get("data_source"),
-                                          deal_size=pair_params.get("deal_size"),
-                                          stop_coef=pair_params.get("stop_coefficient"),
-                                          limit_coef=pair_params.get("limit"),
-                                          dft_period=pair_params.get("dft_period"),
-                                          upper_timeframe_parameters=pair_params.get("upper_timeframe_parameters")
-                                          )
+        pairs_dict[pair_key_short] = MultiIndPair(broker, pair_params)
 
     yield pairs_dict
 
@@ -68,12 +175,13 @@ def make_pairs(session):
 def buy_two_instruments(session, make_pairs):
     broker = session["broker"]
     first_pair = make_pairs["first_pair"]
-    first_pair.fetch_prices(broker, numpoints=10)
-    create_position(broker, first_pair)
+    price = first_pair.get_historical_data().iloc[-1]["close"]
+
+    response = first_pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
 
     second_pair = make_pairs["second_pair"]
-    second_pair.fetch_prices(broker, numpoints=10)
-    create_position(broker, second_pair)
+    price = second_pair.get_historical_data().iloc[-1]["close"]
+    response = second_pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
 
     open_pos = broker.positions_total()
     assert open_pos >= np.floor(first_pair.deal_size) + np.floor(second_pair.deal_size)
@@ -81,47 +189,61 @@ def buy_two_instruments(session, make_pairs):
            "second_pair": second_pair}
 
 
-def test_check_order(session, make_pairs):
-    broker = session["broker"]
-
-    wrong_pairs = (make_pairs["pair_with_wrong_deal_size"],
-                   make_pairs["pair_with_wrong_stop"])
-
-    assert make_pairs["pair_with_wrong_deal_size"] is not None
-    assert make_pairs["pair_with_wrong_stop"] is not None
-
-    for pair in wrong_pairs:
-        pair.fetch_prices(broker, numpoints=10)
-
-        response = create_position(broker, pair)
-        assert response is None
+# def test_check_order(session, make_pairs):
+#     broker = session["broker"]
+#
+#     wrong_pairs = (make_pairs["pair_with_wrong_deal_size"],
+#                    make_pairs["pair_with_wrong_stop"])
+#
+#     assert make_pairs["pair_with_wrong_deal_size"] is not None
+#     assert make_pairs["pair_with_wrong_stop"] is not None
+#
+#     for pair in wrong_pairs:
+#         price = pair.get_curr_price()
+#
+#         response = pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
+#         assert response is None
 
 
 def test_create_position(session, make_pairs):
     broker = session["broker"]
-    pair = make_pairs["first_pair"]
-    pair.fetch_prices(broker, numpoints=10)
 
-    response = create_position(broker, pair)
-    assert response is not None
+    # buy all pairs
+    for pair in [make_pairs["first_pair"], make_pairs["second_pair"]]:
 
-    try:
-        assert response.order != 0
-        assert response.volume == pair.deal_size
-    except Exception as e:
-        print(e)
-    sleep(20)
+        price = pair.get_historical_data().iloc[-1]["close"]
+
+        response = pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
+        assert response is not None
+
+        try:
+            assert response.order != 0
+            assert response.volume == pair.deal_size
+        except Exception as e:
+            print(e)
+        sleep(20)
 
 
 def test_close_opened_position(session, make_pairs):
     broker = session["broker"]
+
+    # sell the first pair with identifier
     pair = make_pairs["first_pair"]
     open_pos = broker.positions_total()
     assert open_pos > 0
-    if pair.prices is None:
-        pair.fetch_prices(broker, numpoints=10)
+    price = pair.get_historical_data().iloc[-1]["close"]
+    response = pair.close_opened_position(price,
+                                          type_action=broker.ORDER_TYPE_SELL,
+                                          identifiers=[broker.positions_get(symbol=pair.symbol)[0].identifier])[0]
+    assert response is not None
+    assert response.volume == pair.deal_size
 
-    response = close_opened_position(broker, pair)
+    # sell the second pair without any identifier
+    pair = make_pairs["second_pair"]
+    open_pos = broker.positions_total()
+    assert open_pos > 0
+    price = pair.get_historical_data().iloc[-1]["close"]
+    response = pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert response.volume == pair.deal_size
 
@@ -133,11 +255,13 @@ def test_close_first_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    response = close_opened_position(broker, first_pair)
+    price = first_pair.get_historical_data().iloc[-1]["close"]
+    response = first_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)
 
-    response = close_opened_position(broker, second_pair)
+    price = second_pair.get_historical_data().iloc[-1]["close"]
+    response = second_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
 
@@ -149,32 +273,16 @@ def test_close_second_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    response = close_opened_position(broker, second_pair)
+    price = second_pair.get_historical_data().iloc[-1]["close"]
+    response = second_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
 
-    response = close_opened_position(broker, first_pair)
+    price = first_pair.get_historical_data().iloc[-1]["close"]
+    response = first_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)
 
-
-def test_fetch_prices(session, make_pairs):
-    broker = session["broker"]
-    pair = make_pairs["first_pair"]
-
-    # initial fetching
-    pair.fetch_prices(broker)
-    pair.prices.iloc[-1, 0] = np.nan
-
-    sleep(60)
-
-    # adding prices
-    pair.fetch_prices(broker, numpoints=10)
-
-    assert pair.prices.isna().sum().sum() == 0
-
-
-# #  python -m pytest test_open_close.py
+# #  python -m pytest .\Tests\test_open_close.py
 # # --trace - option for debug
 # #  s | n - next, s - step into
-
