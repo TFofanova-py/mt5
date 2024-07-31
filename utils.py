@@ -1,7 +1,8 @@
 from datetime import datetime
 import logging
 from time import sleep
-from pair.multiindpair import MultiIndPair
+from typing import Union
+from pair.multiindpair import BasePair, MultiIndPair, RelatedPair
 
 
 def wait_for_next_hour(verbose=False) -> None:
@@ -16,7 +17,7 @@ def wait_for_next_hour(verbose=False) -> None:
     sleep(seconds_to_next_hour)
 
 
-def sleep_with_dummy_requests(delay: int, p: MultiIndPair, **kwargs):
+def sleep_with_dummy_requests(delay: int, p: Union[BasePair, MultiIndPair, RelatedPair], **kwargs):
     if kwargs.get("capital_conn") is None:
         sleep(delay * 60)
 

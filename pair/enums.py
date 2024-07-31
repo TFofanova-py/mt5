@@ -28,6 +28,16 @@ class Direction(str, Enum):
     swing = "swing"
 
 
+class PriceDirection(str, Enum):
+    up = "up"
+    down = "down"
+
+
+class RebuyCondition(str, Enum):
+    short = "candle_close_higher_than_first_deal_price"
+    long = "candle_close_lower_than_first_deal_price"
+
+
 class ConfigType(str, Enum):
     open = "open"
     close = "close"

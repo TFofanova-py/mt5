@@ -1,12 +1,7 @@
-from pydantic import BaseModel, FilePath
-from pair.enums import DataSource, Direction, DivegenceType
+from pydantic import BaseModel
+from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, MT5Broker, DataSourceBroker
+from pair.enums import DivegenceType
 from typing import Union, Any
-
-
-class Symbol(BaseModel):
-    ds_symbol: str
-    deal_size: float = 1.0
-    direction: Direction = Direction.low_long
 
 
 class MinNumberOfDibergence(BaseModel):
@@ -47,40 +42,32 @@ Indicator = Union[
 ]
 
 
-class OpenConfig(BaseModel):
-    resolution: int = 3
+class OpenConfig(BaseOpenConfig):
     pivot_period: int = 5
-    entry: dict  # dict[str, Indicator]
+    entry: dict
     bollinger: Union[Any, None] = None
     next_position_bol_check: bool = False
 
 
-class CloseConfig(BaseModel):
+class CloseConfig(BaseCloseConfig):
     resolution: int = 3
     pivot_period: int = 5
     positive_only: bool = False
     bot_stop_coefficient: Union[float, None] = None
-    entry: dict  # dict[str, Indicator]
+    entry: dict
 
 
-class BaseConfig(BaseModel):
-    login: int
-    password: str
-    server: str
-    path: FilePath
-    data_source: DataSource = DataSource.mt5
-    broker_stop_coefficient: float = 0.9995
-    deviation: int = 50
+class BaseConfig(BaseTradeConfig):
     max_pivot_points: int = 10
     max_bars_to_check: int = 100
     dont_wait_for_confirmation: bool = True
     min_number_of_divergence: MinNumberOfDibergence
     divergence_type: DivegenceType = DivegenceType.regular
-    open_config: OpenConfig
-    close_config: CloseConfig
     entry_price_higher_than: Union[float, None] = None
     entry_price_lower_than: Union[float, None] = None
     exit_target: Union[float, None] = None
+    open_config: OpenConfig = None
+    close_config: CloseConfig = None
 
 
 class BotConfig(BaseConfig):

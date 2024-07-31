@@ -2,25 +2,39 @@ import datetime
 import logging
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Any
 from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
     pivotlow, pivothigh, bollinger_bands)
 from .enums import DivegenceType, DivergenceMode, ConfigType, Direction
 import MetaTrader5 as mt5
-from models import PairConfig
+from models.multiind_models import PairConfig
+from models.vix_models import RelatedPairConfig
+from abc import ABC
 
 
-class MultiIndStrategy:
+class BaseStrategy(ABC):
+    def __init__(self, numpoints: int = 100):
+        self.numpoints = numpoints
+
+    def get_action(self, data: pd.DataFrame,
+                   symbol: str,
+                   positions: list,
+                   stop_coefficient: float,
+                   trade_tick_size: float,
+                   config: Any) -> Tuple[int, dict]:
+        pass
+
+
+class MultiIndStrategy(BaseStrategy):
     def __init__(self, p_config: PairConfig):
-        self.pivot_period: int = p_config.open_config.pivot_period
+        super().__init__(numpoints=p_config.max_bars_to_check)
         self.divtype = p_config.divergence_type
         self.min_number_of_divergence = p_config.min_number_of_divergence
         self.max_pivot_points = p_config.max_pivot_points
         self.max_bars_to_check = p_config.max_bars_to_check
         self.dont_wait_for_confirmation = p_config.dont_wait_for_confirmation
-        self.indicators = p_config.open_config.entry
         self.direction = p_config.direction
         self.entry_price_higher_than = p_config.entry_price_higher_than
         self.entry_price_lower_than = p_config.entry_price_lower_than
@@ -44,7 +58,7 @@ class MultiIndStrategy:
 
     def divergence_length(self, src: pd.Series, close: pd.Series,
                           pivot_vals: np.array, pivot_positions: np.array,
-                          mode: DivergenceMode):
+                          mode: DivergenceMode, pivot_period: int):
 
         def is_suspected():
             func_src = np.greater if mode in [DivergenceMode.pos_reg, DivergenceMode.neg_hid] else np.less
@@ -62,7 +76,7 @@ class MultiIndStrategy:
             startpoint = 0 if self.dont_wait_for_confirmation else 1
 
             for x in range(0, min(len(pivot_positions), self.max_pivot_points)):
-                length = src.index[-1] - pivot_positions.iloc[-x - 1] + self.pivot_period
+                length = src.index[-1] - pivot_positions.iloc[-x - 1] + pivot_period
 
                 # if we reach non valued array element or arrived 101. or previous bars then we don't search more
                 if pivot_positions.iloc[-x - 1] == 0 or length > self.max_bars_to_check - 1:
@@ -82,25 +96,26 @@ class MultiIndStrategy:
 
     def calculate_divs(self, indicator: pd.Series, close: pd.Series,
                        pl_vals: np.array, pl_positions: np.array,
-                       ph_vals: np.array, ph_positions: np.array) -> np.array:
+                       ph_vals: np.array, ph_positions: np.array,
+                       pivot_period: int) -> np.array:
         divs = np.zeros(4, dtype=int)
 
         if self.divtype in [DivegenceType.regular, DivegenceType.both]:
-            divs[0] = self.divergence_length(indicator, close, pl_vals, pl_positions, DivergenceMode.pos_reg)
-            divs[1] = self.divergence_length(indicator, close, ph_vals, ph_positions, DivergenceMode.neg_reg)
+            divs[0] = self.divergence_length(indicator, close, pl_vals, pl_positions, DivergenceMode.pos_reg, pivot_period)
+            divs[1] = self.divergence_length(indicator, close, ph_vals, ph_positions, DivergenceMode.neg_reg, pivot_period)
 
         if self.divtype in [DivegenceType.hidden, DivegenceType.both]:
-            divs[2] = self.divergence_length(indicator, close, pl_vals, pl_positions, DivergenceMode.pos_hid)
-            divs[3] = self.divergence_length(indicator, close, ph_vals, ph_positions, DivergenceMode.neg_hid)
+            divs[2] = self.divergence_length(indicator, close, pl_vals, pl_positions, DivergenceMode.pos_hid, pivot_period)
+            divs[3] = self.divergence_length(indicator, close, ph_vals, ph_positions, DivergenceMode.neg_hid, pivot_period)
 
         return divs
 
-    def count_divergence(self, data: pd.DataFrame, config_type: ConfigType) -> dict:
+    def count_divergence(self, data: pd.DataFrame, config_type: ConfigType, indicators: dict, pivot_period: int) -> dict:
 
         ind_ser: List[pd.Series] = []
         indices: List[str] = []
 
-        for ind_name, ind_params in self.indicators.items():
+        for ind_name, ind_params in indicators.items():
             ind_params = ind_params  # ind_params.dict()
 
             if ind_name == "rsi":
@@ -143,14 +158,14 @@ class MultiIndStrategy:
 
         all_divergences = pd.DataFrame(np.zeros((len(ind_ser), 4)), index=indices)
 
-        pl_vals, pl_positions = pivotlow(data["close"], self.pivot_period)
-        ph_vals, ph_positions = pivothigh(data["close"], self.pivot_period)
+        pl_vals, pl_positions = pivotlow(data["close"], pivot_period)
+        ph_vals, ph_positions = pivothigh(data["close"], pivot_period)
 
         for i, curr_ind_ser in enumerate(ind_ser):
             all_divergences.iloc[i, :] = self.calculate_divs(curr_ind_ser[-self.max_bars_to_check:],
                                                              data["close"][-self.max_bars_to_check:],
                                                              pl_vals, pl_positions,
-                                                             ph_vals, ph_positions)
+                                                             ph_vals, ph_positions, pivot_period)
 
         n_indicators = all_divergences.shape[0]
 
@@ -205,8 +220,11 @@ class MultiIndStrategy:
                    positions: list,
                    stop_coefficient: float,
                    trade_tick_size: float,
-                   config_type: ConfigType) -> Tuple[int, dict]:
-        divergences_cnt = self.count_divergence(data, config_type=config_type)
+                   config: Any) -> Tuple[int, dict]:
+        indicators = config.entry
+        pivot_period = config.pivot_period
+        divergences_cnt = self.count_divergence(data, config_type=config.type.value,
+                                                indicators=indicators, pivot_period=pivot_period)
 
         type_action = None
         details = {"curr_time": data.index[-1]}
@@ -245,7 +263,7 @@ class MultiIndStrategy:
             print(datetime.datetime.now().time().isoformat(timespec='minutes'), symbol, self.direction, "len pos", len(positions),
                   "same direction", same_direction_divergences, "opposite direction", opposite_direction_divergences)
 
-            func_stop = np.less if positions[0].type == 0 else np.greater
+            func_stop = np.less if positions[0].type == 0 else lambda x, y: np.greater(x, 2 - y)
             if func_stop(positions[0].price_current / positions[0].price_open, self.bot_stop_coefficient):
                 print(f'{symbol}: Close position because of bot stop {self.bot_stop_coefficient}')
                 type_action = (positions[0].type + 1) % 2
@@ -292,3 +310,19 @@ class MultiIndStrategy:
             details.update({"price": data["close"].iloc[-1]})
 
         return type_action, details
+
+
+class RelatedStrategy(BaseStrategy):
+    def __init__(self, p_config: RelatedPairConfig):
+        super().__init__()
+        self.num_candles_in_row = p_config.open_config.num_candles_in_row,
+        self.candle_direction = p_config.open_config.candle_direction
+        self.trigger_for_deal = p_config.open_config.trigger_for_deal
+
+    def get_action(self, data: pd.DataFrame,
+                   symbol: str,
+                   positions: list,
+                   stop_coefficient: float,
+                   trade_tick_size: float,
+                   config: Any) -> Tuple[int, dict]:
+        pass
