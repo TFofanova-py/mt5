@@ -34,6 +34,7 @@ class BaseTradeConfig(BaseModel):
     broker: MT5Broker
     data_source: DataSourceBroker
     broker_stop_coefficient: float
+    broker_take_profit: float = None
     deviation: int = 50
     open_config: Any = None
     close_config: Any = None

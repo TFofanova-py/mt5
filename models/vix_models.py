@@ -10,7 +10,7 @@ class RebuyConfig(BaseModel):
     condition: RebuyCondition
 
 
-class OpenConfig(BaseOpenConfig):
+class RelatedOpenConfig(BaseOpenConfig):
     num_candles_in_row: int
     candle_minutes: int
     candle_direction: PriceDirection
@@ -18,8 +18,8 @@ class OpenConfig(BaseOpenConfig):
     rebuy_config: RebuyConfig
 
 
-class CloseConfig(BaseCloseConfig):
-    take_profit: Union[float, None] = None
+class RelatedCloseConfig(BaseCloseConfig):
+    bot_take_profit: Union[float, None] = None
 
 
 class TradeConfig(BaseModel):
@@ -28,9 +28,10 @@ class TradeConfig(BaseModel):
     deal_size: float = 1.0
     deal_direction: Direction = Direction.low_long
     broker_stop_coefficient: float = 0.98
+    broker_take_profit: float = 1.05
     deviation: int = 50
-    open_config: OpenConfig
-    close_config: CloseConfig
+    open_config: RelatedOpenConfig
+    close_config: RelatedCloseConfig
 
 
 class BotConfig(BaseModel):

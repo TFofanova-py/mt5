@@ -11,7 +11,7 @@ from .enums import DataSource, ConfigType, Direction
 from .strategy import MultiIndStrategy, RelatedStrategy
 from models.multiind_models import PairConfig, MT5Broker
 from models.base_models import BasePairConfig, BaseOpenConfig, MakeTradingStepResponse, CheckedConfigResponse
-from models.vix_models import RelatedPairConfig
+from models.vix_models import RelatedPairConfig, RelatedOpenConfig
 import MetaTrader5Copy as mt2
 
 
@@ -26,7 +26,7 @@ class BasePair:
             self.data_source.connection = MT5Broker.model_validate(self.data_source.connection)
             mt2.initialize(login=self.data_source.connection.login, password=self.data_source.connection.password,
                            server=self.data_source.connection.server, path=str(self.data_source.connection.path))
-            print("Connection to the data source", self.symbol, mt2.last_error())
+            print("Connection to the data source", self.datasource_symbol, mt2.last_error())
         if isinstance(pair_config.open_config, dict):
             self.open_config = BaseOpenConfig(**pair_config.open_config)
         else:
@@ -36,6 +36,7 @@ class BasePair:
         self.devaition = pair_config.deviation  # max number of points to squeeze when open / close position
         # stop level coefficient for opening position
         self.broker_stop_coefficient = pair_config.broker_stop_coefficient
+        self.broker_take_profit = pair_config.broker_take_profit
 
         mt5_symbol_info = self.broker.symbol_info(self.symbol)
         self.trade_tick_size = mt5_symbol_info.trade_tick_size if mt5_symbol_info is not None else 0.1
@@ -259,6 +260,9 @@ class BasePair:
             "type_filling": self.broker.ORDER_FILLING_IOC
         }
 
+        if self.broker_take_profit:
+            request.update({"tp": round(self.broker_take_profit * price, abs(int(np.log10(self.trade_tick_size))))})
+
         # check order before placement
         check_result = self.broker.order_check(request)
 
@@ -353,7 +357,29 @@ class MultiIndPair(BasePair):
 class RelatedPair(BasePair):
 
     def __init__(self, broker, pair_config: RelatedPairConfig):
-        super().__init__(broker, BasePairConfig.model_validate(pair_config.dict()))
-        self.open_config = pair_config.open_config
+        casted_open_config = pair_config.open_config.dict()
+        casted_open_config.update({"resolution": pair_config.open_config.candle_minutes})
+        combined_data = {**pair_config.dict(),
+                         "symbol": pair_config.ticker_to_trade,
+                         "ds_symbol": pair_config.ticker_to_monitor,
+                         "open_config": casted_open_config}
+        super().__init__(broker, BasePairConfig.model_validate(combined_data))
+        self.open_config = RelatedOpenConfig.model_validate(casted_open_config)
         self.close_config = pair_config.close_config
-        self.strategy = RelatedStrategy(pair_config)
+        self.strategy = RelatedStrategy()
+
+    def get_configs_to_check(self) -> List[CheckedConfigResponse]:
+        result = super().get_configs_to_check()
+        has_opened_positions = not (self.orders is None or len(self.orders) == 0)
+
+        is_time_to_check = {
+            k: True if v is None else (v - datetime.now()).seconds // 60 >= self.__getattribute__(
+                f"{k}_config").resolution for k, v
+            in self.last_check_time.items()}
+
+        if has_opened_positions and self.open_config.rebuy_config.is_allowed and is_time_to_check[ConfigType.open]:
+            result.append(CheckedConfigResponse(applied_config=self.open_config,
+                                                available_actions=[self.positions[0].type]))
+        return result
+
+

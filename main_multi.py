@@ -6,7 +6,6 @@ import json
 import logging
 from pair.multiindpair import MultiIndPair
 import MetaTrader5 as mt5
-from time import sleep
 import argparse
 import multiprocessing as mp
 from utils import wait_for_next_hour, sleep_with_dummy_requests

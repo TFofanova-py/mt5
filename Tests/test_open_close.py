@@ -4,7 +4,7 @@ import pytest
 import MetaTrader5 as mt5
 from pair.multiindpair import MultiIndPair
 from time import sleep
-from models import BotConfig, PairConfig
+from models.multiind_models import BotConfig, PairConfig
 
 
 @pytest.fixture(scope="module")

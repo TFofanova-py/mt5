@@ -7,10 +7,10 @@ from .ta_utils import (
     rsi, macd, momentum, cci, obv,
     stk, vwmacd, cmf, mfi,
     pivotlow, pivothigh, bollinger_bands)
-from .enums import DivegenceType, DivergenceMode, ConfigType, Direction
+from .enums import DivegenceType, DivergenceMode, ConfigType, Direction, PriceDirection, RebuyCondition
 import MetaTrader5 as mt5
 from models.multiind_models import PairConfig
-from models.vix_models import RelatedPairConfig
+from models.vix_models import RelatedPairConfig, RelatedOpenConfig
 from abc import ABC
 
 
@@ -313,16 +313,26 @@ class MultiIndStrategy(BaseStrategy):
 
 
 class RelatedStrategy(BaseStrategy):
-    def __init__(self, p_config: RelatedPairConfig):
-        super().__init__()
-        self.num_candles_in_row = p_config.open_config.num_candles_in_row,
-        self.candle_direction = p_config.open_config.candle_direction
-        self.trigger_for_deal = p_config.open_config.trigger_for_deal
 
     def get_action(self, data: pd.DataFrame,
                    symbol: str,
                    positions: list,
                    stop_coefficient: float,
                    trade_tick_size: float,
-                   config: Any) -> Tuple[int, dict]:
-        pass
+                   config: RelatedOpenConfig) -> Tuple[int, dict]:
+
+        action = None
+        data["close_1"] = data["close"].shift(1)
+        candle_directions = (data["close"] - data["close_1"]).apply(lambda s: PriceDirection.up.value if s >= 0 else PriceDirection.down.value)
+        tail = candle_directions[-config.num_candles_in_row:]
+        percent = abs(1 - data.iloc[-1]["close"] / data.iloc[-config.num_candles_in_row - 1]["close"]) * 100
+
+        if len(positions) == 0 and all(tail == config.candle_direction) and percent > config.trigger_for_deal:
+            return mt5.ORDER_TYPE_BUY if config.candle_direction == PriceDirection.down.value else mt5.ORDER_TYPE_SELL, {}
+
+        elif len(positions) > 0 and config.rebuy_config.is_allowed:
+            func = np.greater if config.rebuy_config.condition == RebuyCondition.short else np.less
+            if func(positions[0].price, data.iloc[-1]["close"]):
+                return positions[0].type, {"deal_size": config.rebuy_config.deal_size}
+
+        return action, {}
