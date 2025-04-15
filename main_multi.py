@@ -33,7 +33,8 @@ def continuous_trading_pair(p_config: PairConfig, **kwargs):
             if not response.is_success:
                 print(f"{p.symbol}, Something went wrong in making trading step")
             sleep_with_dummy_requests(response.time_to_sleep, p, **kwargs)
-        except:
+        except Exception as e:
+            print(p.symbol, e, traceback.format_exc())
             raise Exception("".join(traceback.format_exception(*sys.exc_info())))
 
 

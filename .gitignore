@@ -4,3 +4,7 @@ config_mt5.py
 .pytest_cache/
 Simulation/*.json
 Simulation/*.csv
+.idea/
+*/__pycache__/
+__pycache__/
+*.json

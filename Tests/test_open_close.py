@@ -2,7 +2,7 @@ import json
 import numpy as np
 import pytest
 import MetaTrader5 as mt5
-from pair.multiindpair import MultiIndPair
+from pair.multiindpair import BasePair
 from time import sleep
 from models.multiind_models import BotConfig, PairConfig
 
@@ -11,19 +11,18 @@ from models.multiind_models import BotConfig, PairConfig
 def session():
     config = json.load(open("42503701-adm.json"))
     config = BotConfig(**config)
-    mt5.initialize(login=config.login, password=config.password,
-                   server=config.server, path=str(config.path))
-    initialization_config = {"login": config.login,
-                             "password": config.password,
-                             "server": config.server,
-                             "path": config.path}
+    initialization_config = {"login": config.broker.login,
+                             "password": config.broker.password,
+                             "server": config.broker.server,
+                             "path": str(config.broker.path)}
+    mt5.initialize(**initialization_config)
     yield {"broker": mt5,
-           "pairs": {"first_pair_params": PairConfig(**initialization_config,
+           "pairs": {"first_pair_params": PairConfig(broker=initialization_config,
+                                                     data_source={"name": "mt5", "connection": initialization_config},
                                                      **{"symbol": "USDCAD",
                                                          "ds_symbol": "USDCAD",
-                                                        "data_source": "mt5",
                                                         "deal_size": 0.05,
-                                                        "stop_coefficient": 0.997,
+                                                        "broker_stop_coefficient": 0.997,
                                                         "direction": "low-long",
                                                         "max_pivot_points": 10,
                                                         "max_bars_to_check": 100,
@@ -52,12 +51,12 @@ def session():
                                                                 },
                                                             }
                                                         }}),
-                     "second_pair_params": PairConfig(**initialization_config,
+                     "second_pair_params": PairConfig(broker=initialization_config,
+                                                     data_source={"name": "mt5", "connection": initialization_config},
                                                       **{"symbol": "USDCHF",
                                                          "ds_symbol": "USDCHF",
-                                                         "data_source": "mt5",
                                                          "deal_size": 0.05,
-                                                         "stop_coefficient": 0.998,
+                                                         "broker_stop_coefficient": 0.998,
                                                          "direction": "low-long",
                                                          "max_pivot_points": 10,
                                                          "max_bars_to_check": 100,
@@ -86,12 +85,12 @@ def session():
                                                                  },
                                                              }
                                                          }}),
-                     "pair_with_wrong_deal_size_params": PairConfig(**initialization_config,
+                     "pair_with_wrong_deal_size_params": PairConfig(broker=initialization_config,
+                                                                    data_source={"name": "mt5", "connection": initialization_config},
                                                                     **{"symbol": "[SP500]",
                                                                        "ds_symbol": "[SP500]",
-                                                                       "data_source": "mt5",
                                                                        "deal_size": 1000.0,
-                                                                       "stop_coefficient": 0.994,
+                                                                       "broker_stop_coefficient": 0.994,
                                                                        "direction": "low-long",
                                                                        "max_pivot_points": 10,
                                                                        "max_bars_to_check": 100,
@@ -120,13 +119,13 @@ def session():
                                                                                },
                                                                            }
                                                                        }}),
-                     "pair_with_wrong_stop_params": PairConfig(**initialization_config,
+                     "pair_with_wrong_stop_params": PairConfig(broker=initialization_config,
+                                                                data_source={"name": "mt5", "connection": initialization_config},
                                                                **{"symbol": "BTCUSD",
                                                                   "ds_symbol": "BTCUSD",
-                                                                  "data_source": "mt5",
                                                                   "resolution": mt5.TIMEFRAME_M3,
                                                                   "deal_size": 0.05,
-                                                                  "stop_coefficient": 0.999,
+                                                                  "broker_stop_coefficient": 0.999,
                                                                   "direction": "low-long",
                                                                   "max_pivot_points": 10,
                                                                   "max_bars_to_check": 100,
@@ -166,7 +165,7 @@ def make_pairs(session):
     for pair_key in session["pairs"]:
         pair_params = session["pairs"][pair_key]
         pair_key_short = pair_key[:-7]
-        pairs_dict[pair_key_short] = MultiIndPair(broker, pair_params)
+        pairs_dict[pair_key_short] = BasePair(broker, pair_params)
 
     yield pairs_dict
 
@@ -175,12 +174,12 @@ def make_pairs(session):
 def buy_two_instruments(session, make_pairs):
     broker = session["broker"]
     first_pair = make_pairs["first_pair"]
-    price = first_pair.get_historical_data().iloc[-1]["close"]
+    price = first_pair.get_historical_data(resolution=first_pair.open_config.resolution).iloc[-1]["close"]
 
     response = first_pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
 
     second_pair = make_pairs["second_pair"]
-    price = second_pair.get_historical_data().iloc[-1]["close"]
+    price = second_pair.get_historical_data(resolution=second_pair.open_config.resolution).iloc[-1]["close"]
     response = second_pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
 
     open_pos = broker.positions_total()
@@ -211,7 +210,7 @@ def test_create_position(session, make_pairs):
     # buy all pairs
     for pair in [make_pairs["first_pair"], make_pairs["second_pair"]]:
 
-        price = pair.get_historical_data().iloc[-1]["close"]
+        price = pair.get_historical_data(resolution=pair.open_config.resolution).iloc[-1]["close"]
 
         response = pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
         assert response is not None
@@ -231,7 +230,7 @@ def test_close_opened_position(session, make_pairs):
     pair = make_pairs["first_pair"]
     open_pos = broker.positions_total()
     assert open_pos > 0
-    price = pair.get_historical_data().iloc[-1]["close"]
+    price = pair.get_historical_data(resolution=pair.open_config.resolution).iloc[-1]["close"]
     response = pair.close_opened_position(price,
                                           type_action=broker.ORDER_TYPE_SELL,
                                           identifiers=[broker.positions_get(symbol=pair.symbol)[0].identifier])[0]
@@ -242,7 +241,7 @@ def test_close_opened_position(session, make_pairs):
     pair = make_pairs["second_pair"]
     open_pos = broker.positions_total()
     assert open_pos > 0
-    price = pair.get_historical_data().iloc[-1]["close"]
+    price = pair.get_historical_data(resolution=pair.open_config.resolution).iloc[-1]["close"]
     response = pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert response.volume == pair.deal_size
@@ -255,12 +254,12 @@ def test_close_first_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    price = first_pair.get_historical_data().iloc[-1]["close"]
+    price = first_pair.get_historical_data(resolution=first_pair.open_config.resolution).iloc[-1]["close"]
     response = first_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)
 
-    price = second_pair.get_historical_data().iloc[-1]["close"]
+    price = second_pair.get_historical_data(resolution=second_pair.open_config.resolution).iloc[-1]["close"]
     response = second_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
@@ -273,12 +272,12 @@ def test_close_second_buyed_position(session, buy_two_instruments):
 
     sleep(20)
 
-    price = second_pair.get_historical_data().iloc[-1]["close"]
+    price = second_pair.get_historical_data(resolution=second_pair.open_config.resolution).iloc[-1]["close"]
     response = second_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, second_pair.deal_size)
 
-    price = first_pair.get_historical_data().iloc[-1]["close"]
+    price = first_pair.get_historical_data(resolution=first_pair.open_config.resolution).iloc[-1]["close"]
     response = first_pair.close_opened_position(price, type_action=broker.ORDER_TYPE_SELL)[0]
     assert response is not None
     assert np.allclose(response.volume, first_pair.deal_size)

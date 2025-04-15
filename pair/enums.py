@@ -41,3 +41,16 @@ class RebuyCondition(str, Enum):
 class ConfigType(str, Enum):
     open = "open"
     close = "close"
+
+
+class ActionMethod(str, Enum):
+    trade = "trade"
+    alarm = "alarm"
+
+
+class IchimokuTrend(str, Enum):
+    strong_bullish = "Strong Bullish"
+    bullish = "Bullish"
+    strong_bearish = "Strong Bearish"
+    bearish = "Bearish"
+    consolidation = "Consolidation"

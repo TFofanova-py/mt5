@@ -1,7 +1,7 @@
 from pydantic import BaseModel
-from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, MT5Broker, DataSourceBroker
+from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, BaseActionDetails
 from pair.enums import DivegenceType
-from typing import Union, Any
+from typing import Union, Any, Tuple, List
 
 
 class MinNumberOfDibergence(BaseModel):
@@ -42,8 +42,15 @@ Indicator = Union[
 ]
 
 
+class IchimokuConfig(BaseModel):
+    long_tf: int
+    short_tf: int
+    periods: Tuple[int, int, int]
+
+
 class OpenConfig(BaseOpenConfig):
     pivot_period: int = 5
+    ichimoku: Union[IchimokuConfig, None] = None
     entry: dict
     bollinger: Union[Any, None] = None
     next_position_bol_check: bool = False
@@ -77,3 +84,5 @@ class BotConfig(BaseConfig):
 
 class PairConfig(BaseConfig, Symbol):
     symbol: str
+
+

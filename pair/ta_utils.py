@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Union
+from pair.enums import IchimokuTrend
 
 
 def crossover(ts_1: pd.Series, ts_2: pd.Series) -> bool:  # ts_1 crossovers ts_2
@@ -200,3 +201,72 @@ def mfi(df: pd.DataFrame, length: int = 14) -> pd.DataFrame:
 
     return df_mfi
 
+
+def ichimoku(df: pd.DataFrame, conv: int = 9, base: int = 26, span_b: int = 52):
+    df['tenkan_sen'] = (df['high'].rolling(window=conv).max() + df['low'].rolling(window=conv).min()) / 2
+    df['kijun_sen'] = (df['high'].rolling(window=base).max() + df['low'].rolling(window=base).min()) / 2
+    df['senkou_span_a'] = (df['tenkan_sen'] + df['kijun_sen']) / 2
+    df['senkou_span_b'] = (df['high'].rolling(window=span_b).max() + df['low'].rolling(window=span_b).min()) / 2
+    df['chikou'] = df['close'].shift(base)
+    return df
+
+
+def analyze_ichimoku(df: pd.DataFrame, periods: Tuple[int, int, int]) -> Union[Tuple[IchimokuTrend, bool], None]:
+        """Analyze Ichimoku signals for the current market state."""
+        # Returns (0) trend and (1) bool value - trand is changing
+
+        conv, base, span_b = periods
+        df = ichimoku(df, conv=conv, base=base, span_b=span_b)
+
+        if len(df) < 3:
+            return None
+
+        # Get the latest data points
+        current = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        current_trend = get_ichimoku_trend(current)
+        prev_trend = get_ichimoku_trend(prev)
+
+        global_current_trend = current_trend.value.replace("Strong", "").strip().lower()
+        global_prev_trend = prev_trend.value.replace("Strong", "").strip().lower()
+
+        return current_trend, global_prev_trend != global_current_trend
+
+
+def get_ichimoku_trend(row: pd.Series) -> IchimokuTrend:
+    # Price positioning
+    price = row['close']
+
+    # Tenkan-sen and Kijun-sen crossover detection
+    tenkan_above_kijun = row['tenkan_sen'] > row['kijun_sen']
+    tenkan_below_kijun = row['tenkan_sen'] < row['kijun_sen']
+
+    # Price and Kumo (cloud) relationship
+    cloud_top = max(row['senkou_span_a'], row['senkou_span_b'])
+    cloud_bottom = min(row['senkou_span_a'], row['senkou_span_b'])
+
+    price_above_kumo = price > cloud_top
+    price_below_kumo = price < cloud_bottom
+    price_in_kumo = not price_above_kumo and not price_below_kumo
+
+    # Kumo characteristics
+    kumo_bullish = row['senkou_span_a'] > row['senkou_span_b']
+    kumo_bearish = row['senkou_span_a'] < row['senkou_span_b']
+
+    # Price and Tenkan/Kijun relationship
+    price_above_tenkan = price > row['tenkan_sen']
+    price_below_tenkan = price < row['tenkan_sen']
+    price_above_kijun = price > row['kijun_sen']
+    price_below_kijun = price < row['kijun_sen']
+
+    # Trend determination
+    if price_above_kumo and kumo_bullish and tenkan_above_kijun:
+        return IchimokuTrend.strong_bullish
+    elif price_above_kumo or (price_above_tenkan and price_above_kijun):
+        return IchimokuTrend.bullish
+    elif price_below_kumo and kumo_bearish and tenkan_below_kijun:
+        return IchimokuTrend.strong_bearish
+    elif price_below_kumo or (price_below_tenkan and price_below_kijun):
+        return IchimokuTrend.bearish
+    return IchimokuTrend.consolidation
