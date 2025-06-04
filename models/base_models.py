@@ -76,7 +76,7 @@ class CheckedConfigResponse(BaseModel):
 
 
 class BaseActionDetails(BaseModel):
-    curr_time: datetime.datetime
+    curr_time: Union[datetime.datetime, None] = None
     deal_size: Union[float, None] = None
 
 

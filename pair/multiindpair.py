@@ -217,9 +217,9 @@ class BasePair:
                                                 type_action=type_action,
                                                 deal_size=action_details.deal_size,
                                                 **kwargs)
+                # if order is completed
                 if response and response.retcode == 10009:
                     self.orders.append(response.order)
-                # self.resolution = self.close_config.resolution
 
                 logging.info(f"{curr_time}, open position: {response}")
                 print(response)
@@ -231,8 +231,9 @@ class BasePair:
                                                        **kwargs)
                 print(responses)
                 for resp in responses:
-                    if not isinstance(resp, str):
-                        self.orders.remove(resp.request.position)
+                    if resp and not isinstance(resp, str):
+                        if resp.retcode == 10009:
+                            self.orders.remove(resp.request.position)
                 logging.info(f"{curr_time}, close position: {responses}")
 
         elif type_action == self.broker.TRADE_ACTION_SLTP:
@@ -309,7 +310,11 @@ class BasePair:
                     print(f"Waiting for {self.time_to_trade} to trade")
                     sleep(self.get_seconds_to_time(self.time_to_trade))
 
-                self.make_action(type_action, action_details)
+                kwargs = {}
+                if hasattr(self.strategy, "bot_stop_coefficient"):
+                    kwargs = {"bot_stop_coefficient": self.strategy.bot_stop_coefficient}
+
+                self.make_action(type_action, action_details, **kwargs)
                 sleep(5)
                 self.update_positions()
 
@@ -362,28 +367,35 @@ class BasePair:
         if identifiers is None:
             identifiers = self.orders
 
-        profits = [pos.profit for pos in self.broker.positions_get(symbol=self.symbol)
+        bot_stop_coefficient = kwargs.get("bot_stop_coefficient")
+
+        positions = [pos for pos in self.broker.positions_get(symbol=self.symbol)
                    if pos.identifier in identifiers]
 
         responses = []
-        for i, position in enumerate(identifiers):
-            if not positive_only or profits[i] > 0:
-                request = {
-                    "action": self.broker.TRADE_ACTION_DEAL,
-                    "symbol": self.symbol,
-                    "volume": self.deal_size,
-                    "deviation": self.devaition,
-                    "type": type_action,
-                    "position": position,
-                    "price": price,
-                    "comment": "python script close",
-                    "type_time": self.broker.ORDER_TIME_GTC,
-                    "type_filling": self.broker.ORDER_FILLING_IOC
-                }
-                # check order before placement
-                # check_result = broker.order_check(request)
+        for i, position in enumerate(positions):
+            request = {
+                "action": self.broker.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": self.deal_size,
+                "deviation": self.devaition,
+                "type": type_action,
+                "position": position.identifier,
+                "price": price,
+                "comment": "python script close",
+                "type_time": self.broker.ORDER_TIME_GTC,
+                "type_filling": self.broker.ORDER_FILLING_IOC
+            }
+
+            func_stop = np.less if position.type == 0 else lambda x, y: np.greater(x, 2 - y)
+            if func_stop(position.price_current / position.price_open, bot_stop_coefficient):
+                print(f'{position.symbol}: Close position {position.identifier} because of bot stop {bot_stop_coefficient}')
                 responses.append(self.broker.order_send(request))
-            else:
+
+            elif not positive_only or position.profit >= 0:
+                responses.append(self.broker.order_send(request))
+
+            elif positive_only and position.profit < 0:
                 responses.append(f"Don't close negative position {position}")
 
         return responses

@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, BaseActionDetails
-from pair.enums import DivegenceType
+from pair.enums import DivegenceType, IchimokuLayerStatus, IchimokuTrend
 from typing import Union, Any, Tuple, List
 
 
@@ -42,11 +42,18 @@ Indicator = Union[
 ]
 
 
+class IchimokuLayer(BaseModel):
+    tf: int
+    status: IchimokuLayerStatus
+
+
 class IchimokuConfig(BaseModel):
-    long_tf: int
-    short_tf: int
+    layers: List[IchimokuLayer]
     periods: Tuple[int, int, int]
 
+class IchimokuResponse(BaseModel):
+    trends: List[Union[IchimokuTrend, None]]
+    is_changing: bool
 
 class OpenConfig(BaseOpenConfig):
     pivot_period: int = 5

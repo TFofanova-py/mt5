@@ -54,3 +54,7 @@ class IchimokuTrend(str, Enum):
     strong_bearish = "Strong Bearish"
     bearish = "Bearish"
     consolidation = "Consolidation"
+
+class IchimokuLayerStatus(str, Enum):
+    active = "active"
+    monitoring = "monitoring"
