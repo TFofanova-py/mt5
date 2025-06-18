@@ -267,7 +267,7 @@ class MultiIndStrategy(BaseStrategy):
             return None
 
         return IchimokuResponse(trends=trends,
-                                is_changing=[x for x in trend_changings if x is not None][-1]  # the shortest active layer
+                                is_changing=any([x for x in trend_changings if x is not None]) # change in any layer
                                 )
 
 
@@ -315,12 +315,11 @@ class MultiIndStrategy(BaseStrategy):
                                                 bollinger_cond_lower=bollinger_cond_lower,
                                                 bollinger_cond_upper=bollinger_cond_upper,
                                                 ichimoku_trends=ichimoku_trends)
-            if action_type:
+            if action_type is not None:
                 print(
                     f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {symbol}: Actions is {action_type}")
                 return action_type, BuySellActionDetails(curr_time=data.index[-1],
-                                                         positive_only=False if ichimoku_trends and ichimoku_trends.get(
-                                                             "trend_is_changing") else self.close_positive_only,
+                                                         positive_only=False if ichimoku_trends and ichimoku_trends.is_changing else self.close_positive_only,
                                                          price=data["close"].iloc[-1])
 
             modify_result = self.get_modify_action(data=data,
@@ -361,17 +360,23 @@ class MultiIndStrategy(BaseStrategy):
                 (self.direction != Direction.high_short or
                  self.entry_price_higher_than is None or
                  (self.entry_price_higher_than and price > self.entry_price_higher_than)) and \
-                (self.ichimoku_trends is None or all([t in [IchimokuTrend.strong_bearish, IchimokuTrend.bearish, None] for t in
+                (ichimoku_trends is None or all([t in [IchimokuTrend.strong_bearish, IchimokuTrend.bearish, None] for t in
                                                ichimoku_trends.trends])):
             return mt5.ORDER_TYPE_SELL
 
     def get_close_action(self, symbol: str, positions: list, price: float, divergences_cnt: dict, bollinger_cond_lower: bool, bollinger_cond_upper: bool,
                                 ichimoku_trends: Union[None, IchimokuResponse]) -> Union[int, None]:
 
-        details = {"positive_only": self.close_positive_only}
+        # high priority
+        func_stop = np.less if positions[0].type == 0 else lambda x, y: np.greater(x, 2 - y)
+        if func_stop(positions[0].price_current / positions[0].price_open, self.bot_stop_coefficient):
+            print(f'{symbol}: Close position because of bot stop {self.bot_stop_coefficient}')
+            # close position
+            return (positions[0].type + 1) % 2
+
+        # medium priority
         if ichimoku_trends is not None:
             short_ichimoku_trend = [x for x in ichimoku_trends.trends if x][-1]
-            details.update()
             if (short_ichimoku_trend == IchimokuTrend.consolidation or
                (positions[0].type == 0 and short_ichimoku_trend in [IchimokuTrend.bearish, IchimokuTrend.strong_bearish, None]) or
                (positions[0].type == 1 and short_ichimoku_trend in [IchimokuTrend.bullish, IchimokuTrend.strong_bullish, None])):
@@ -391,18 +396,15 @@ class MultiIndStrategy(BaseStrategy):
         logging.info(
             f"{symbol}, {self.direction}, len pos {len(positions)}, same direction={same_direction_divergences}, opposite direction={opposite_direction_divergences}")
 
-        func_stop = np.less if positions[0].type == 0 else lambda x, y: np.greater(x, 2 - y)
-        if func_stop(positions[0].price_current / positions[0].price_open, self.bot_stop_coefficient):
-            print(f'{symbol}: Close position because of bot stop {self.bot_stop_coefficient}')
-            # close position
-            return (positions[0].type + 1) % 2
-
-        elif opposite_direction_divergences >= self.min_number_of_divergence.exit_tp and (
+        # low priority
+        if opposite_direction_divergences >= self.min_number_of_divergence.exit_tp and (
                 self.exit_target is None or (self.direction == Direction.high_short) * (price < self.exit_target)
                 or (self.direction == Direction.low_long) * (price > self.exit_target)):
             # close position
             return (positions[0].type + 1) % 2
 
+
+        # open another position
         elif same_direction_divergences >= self.min_number_of_divergence.entry:
 
             if (ichimoku_trends is None or

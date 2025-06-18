@@ -9,7 +9,7 @@ from models.multiind_models import BotConfig, PairConfig
 
 @pytest.fixture(scope="module")
 def session():
-    config = json.load(open("42503701-adm.json"))
+    config = json.load(open("../test-ichimoku.json"))
     config = BotConfig(**config)
     initialization_config = {"login": config.broker.login,
                              "password": config.broker.password,
@@ -187,21 +187,6 @@ def buy_two_instruments(session, make_pairs):
     yield {"first_pair": first_pair,
            "second_pair": second_pair}
 
-
-# def test_check_order(session, make_pairs):
-#     broker = session["broker"]
-#
-#     wrong_pairs = (make_pairs["pair_with_wrong_deal_size"],
-#                    make_pairs["pair_with_wrong_stop"])
-#
-#     assert make_pairs["pair_with_wrong_deal_size"] is not None
-#     assert make_pairs["pair_with_wrong_stop"] is not None
-#
-#     for pair in wrong_pairs:
-#         price = pair.get_curr_price()
-#
-#         response = pair.create_position(price, type_action=broker.ORDER_TYPE_BUY)
-#         assert response is None
 
 
 def test_create_position(session, make_pairs):
