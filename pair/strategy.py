@@ -369,8 +369,8 @@ class MultiIndStrategy(BaseStrategy):
 
         # high priority
         func_stop = np.less if positions[0].type == 0 else lambda x, y: np.greater(x, 2 - y)
-        if func_stop(positions[0].price_current / positions[0].price_open, self.bot_stop_coefficient):
-            print(f'{symbol}: Close position because of bot stop {self.bot_stop_coefficient}')
+        if any([func_stop(pos.price_current / pos.price_open, self.bot_stop_coefficient) for pos in positions]):
+            print(f'{symbol}: Close positions because of bot stop {self.bot_stop_coefficient}')
             # close position
             return (positions[0].type + 1) % 2
 
