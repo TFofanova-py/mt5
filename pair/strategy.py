@@ -9,10 +9,11 @@ from .ta_utils import (
     pivotlow, pivothigh, bollinger_bands,
     analyze_ichimoku)
 from .enums import DivegenceType, DivergenceMode, ConfigType, Direction, PriceDirection, RebuyCondition, IchimokuTrend, \
-    IchimokuLayerStatus
+    IchimokuLayerStatus, ClosePositionReason
 import MetaTrader5 as mt5
 from models.base_models import ActionDetails, BaseActionDetails, BuySellActionDetails, ModifySLActionDetails
-from models.multiind_models import PairConfig, IchimokuResponse
+from models.multiind_models import PairConfig, IchimokuResponse, DivergenceCountResponse, MultiIndBuySellActionDetails, \
+    IchimokuTrendResponse
 from models.vix_models import RelatedPairConfig, RelatedOpenConfig, RebuyConfig
 from abc import ABC
 
@@ -60,6 +61,7 @@ class MultiIndStrategy(BaseStrategy):
         if self.ichimoku:
             # assert any([x.status == IchimokuLayerStatus.active for x in self.ichimoku.layers]), "At least one ichimoku layer must be active"
             assert all([self.ichimoku.layers[i].tf > self.ichimoku.layers[i+1].tf for i in range(len(self.ichimoku.layers) - 1)]), "Ichimoku layers must be in a descending order"
+        self.max_position_count = p_config.open_config.max_position_count
 
     @staticmethod
     def arrived_divergence(src, close, startpoint, length, np_func):
@@ -130,7 +132,7 @@ class MultiIndStrategy(BaseStrategy):
         return divs
 
     def count_divergence(self, data: pd.DataFrame, config_type: ConfigType, indicators: dict,
-                         pivot_period: int) -> dict:
+                         pivot_period: int) -> DivergenceCountResponse:
 
         ind_ser: List[pd.Series] = []
         indices: List[str] = []
@@ -212,13 +214,17 @@ class MultiIndStrategy(BaseStrategy):
 
                 if new_divergence:
                     self.last_divergence[config_type][t] = data.index[-1]
-                    triggered_idx = np.any(div_signals > 0, axis=1).tolist()
-                    triggered_inds = [idx_name for idx, idx_name in enumerate(indices) if triggered_idx[idx]]
+                    return DivergenceCountResponse(top_cnt=div_signals["top"].sum(),
+                                                   bottom_cnt=div_signals["bottom"].sum(),
+                                                   top_triggered=div_signals[div_signals["top"] > 0].index.to_list(),
+                                                   bottom_triggered=div_signals[div_signals["bottom"] > 0].index.to_list()
+                                                   )
+                    #
+                    # return {"top": div_signals["top"].sum(),
+                    #         "bottom": div_signals["bottom"].sum(), "triggered": triggered_inds}
 
-                    return {"top": div_signals["top"].sum(),
-                            "bottom": div_signals["bottom"].sum(), "triggered": triggered_inds}
+        return DivergenceCountResponse(top_cnt=0, bottom_cnt=0)
 
-        return {"top": 0, "bottom": 0, "triggered": []}
 
     @staticmethod
     def was_price_goes_up(data: pd.DataFrame) -> bool:
@@ -277,7 +283,7 @@ class MultiIndStrategy(BaseStrategy):
                    stop_coefficient: float,
                    trade_tick_size: float,
                    config: Any,
-                   verbose: bool = False) -> Tuple[Union[int, None], ActionDetails]:
+                   verbose: bool = False) -> Tuple[Union[int, None], Union[ActionDetails, MultiIndBuySellActionDetails]]:
 
 
         ichimoku_trends = self.get_ichimoku_trends(symbol=symbol, data=data) if self.ichimoku is not None else None
@@ -287,9 +293,14 @@ class MultiIndStrategy(BaseStrategy):
         divergences_cnt = self.count_divergence(data, config_type=config.type.value,
                                                 indicators=indicators, pivot_period=pivot_period)
 
+        type_action = None
+        reason = None
+        details = BaseActionDetails(curr_time=data.index[-1])
+        price = data["close"].iloc[-1]
+
         bollinger_cond_lower, bollinger_cond_upper = self.get_bollinger_conditions(data)
 
-        if divergences_cnt["top"] + divergences_cnt["bottom"] > 0:
+        if divergences_cnt.top_cnt + divergences_cnt.bottom_cnt > 0:
             print(
                 f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {symbol}: divergences {divergences_cnt}, bollinger_lower: {bollinger_cond_lower}, bollinger_upper: {bollinger_cond_upper}")
             logging.info(
@@ -345,7 +356,7 @@ class MultiIndStrategy(BaseStrategy):
                         bollinger_cond_lower: bool, bollinger_cond_upper: bool,
                         ichimoku_trends: Union[None, IchimokuResponse]) -> Union[int, None]:
         if self.direction in [Direction.low_long, Direction.bi, Direction.swing] and \
-                divergences_cnt["bottom"] >= self.min_number_of_divergence.entry and \
+                divergences_cnt.bottom_cnt >= self.min_number_of_divergence.entry and \
                 bollinger_cond_lower and \
                 (self.direction != Direction.low_long or
                  self.entry_price_lower_than is None or
@@ -354,8 +365,8 @@ class MultiIndStrategy(BaseStrategy):
                                                ichimoku_trends.trends])):
             return mt5.ORDER_TYPE_BUY
 
-        if self.direction in [Direction.high_short, Direction.bi, Direction.swing] and \
-                divergences_cnt["top"] >= self.min_number_of_divergence.entry and \
+        elif self.direction in [Direction.high_short, Direction.bi, Direction.swing] and \
+                divergences_cnt.top_cnt >= self.min_number_of_divergence.entry and \
                 bollinger_cond_upper and \
                 (self.direction != Direction.high_short or
                  self.entry_price_higher_than is None or
@@ -364,7 +375,7 @@ class MultiIndStrategy(BaseStrategy):
                                                ichimoku_trends.trends])):
             return mt5.ORDER_TYPE_SELL
 
-    def get_close_action(self, symbol: str, positions: list, price: float, divergences_cnt: dict, bollinger_cond_lower: bool, bollinger_cond_upper: bool,
+    def get_close_action(self, symbol: str, positions: list, price: float, divergences_cnt: DivergenceCountResponse, bollinger_cond_lower: bool, bollinger_cond_upper: bool,
                                 ichimoku_trends: Union[None, IchimokuResponse]) -> Union[int, None]:
 
         # high priority
@@ -372,6 +383,7 @@ class MultiIndStrategy(BaseStrategy):
         if any([func_stop(pos.price_current / pos.price_open, self.bot_stop_coefficient) for pos in positions]):
             print(f'{symbol}: Close positions because of bot stop {self.bot_stop_coefficient}')
             # close position
+            reason = ClosePositionReason.bot_stop
             return (positions[0].type + 1) % 2
 
         # medium priority
@@ -383,12 +395,12 @@ class MultiIndStrategy(BaseStrategy):
 
                 print(f"{symbol}, close position because of changing Ichimoku trend")
                 # close position
+                reason = ClosePositionReason.ichimoku
                 return (positions[0].type + 1) % 2
 
-        same_direction_divergences = divergences_cnt["bottom"] if positions[0].type == 0 \
-            else divergences_cnt["top"]
-        opposite_direction_divergences = divergences_cnt["top"] if positions[0].type == 0 else divergences_cnt[
-            "bottom"]
+        same_direction_divergences = divergences_cnt.bottom_cnt if positions[0].type == 0 \
+            else divergences_cnt.top_cnt
+        opposite_direction_divergences = divergences_cnt.top_cnt if positions[0].type == 0 else divergences_cnt.bottom_cnt
 
         print(datetime.datetime.now().time().isoformat(timespec='minutes'), symbol, self.direction, "len pos",
               len(positions),
@@ -401,11 +413,15 @@ class MultiIndStrategy(BaseStrategy):
                 self.exit_target is None or (self.direction == Direction.high_short) * (price < self.exit_target)
                 or (self.direction == Direction.low_long) * (price > self.exit_target)):
             # close position
+            reason =ClosePositionReason.divergence
             return (positions[0].type + 1) % 2
 
 
         # open another position
         elif same_direction_divergences >= self.min_number_of_divergence.entry:
+            if self.max_position_count and len(positions) >= self.max_position_count:
+                f"{datetime.datetime.now().time().isoformat(timespec='minutes')} {symbol}: can't open position due to max position count"
+                return None
 
             if (ichimoku_trends is None or
                (positions[0].type == 1 and all([t in [IchimokuTrend.strong_bearish, IchimokuTrend.bearish, None] for t in
@@ -443,6 +459,15 @@ class MultiIndStrategy(BaseStrategy):
 
         if new_sls:
             return mt5.TRADE_ACTION_SLTP, ModifySLActionDetails(new_sls=new_sls, identifiers=identifiers)
+
+        # if type_action in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]:
+        #     details = MultiIndBuySellActionDetails(**details.model_dump(mode="json"))
+        #     details.positive_only = False if self.ichimoku is not None and trend_is_changing else self.close_positive_only
+        #     details.price = data["close"].iloc[-1]
+        #     details.bot_stop_coefficient = self.bot_stop_coefficient
+        #     details.divergence = divergences_cnt
+        #     details.ichimoku_trends = IchimokuTrendResponse(long=long_ichimoku_trend, short=short_ichimoku_trend, long_tf=self.ichimoku.long_tf, short_tf=self.ichimoku.short_tf)
+        #     details.reason = reason
 
 
 

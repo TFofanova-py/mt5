@@ -58,3 +58,9 @@ class IchimokuTrend(str, Enum):
 class IchimokuLayerStatus(str, Enum):
     active = "active"
     monitoring = "monitoring"
+
+
+class ClosePositionReason(str, Enum):
+    bot_stop = "Bot stop"
+    ichimoku = "Ichimoku trend"
+    divergence = "Divergence"

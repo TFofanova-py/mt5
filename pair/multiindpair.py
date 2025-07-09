@@ -4,24 +4,28 @@ from time import sleep
 import logging
 import pandas as pd
 import numpy as np
+from db.crud import db_client
 from .constants import MT5_TIMEFRAME
 from typing import List, Union
 from .external_history import get_yahoo_data, get_twelvedata
 from .enums import DataSource, ConfigType, Direction, ActionMethod
 from .strategy import MultiIndStrategy, RelatedStrategy
-from models.multiind_models import PairConfig
+from models.multiind_models import PairConfig, DivergenceCountResponse, IchimokuTrendResponse, \
+    MultiIndBuySellActionDetails
 from models.base_models import BasePairConfig, BaseOpenConfig, MakeTradingStepResponse, CheckedConfigResponse, MT5Broker, ActionDetails
 from models.vix_models import RelatedPairConfig, RelatedOpenConfig
 import MetaTrader5Copy as mt2
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import itertools
+from .ta_utils import ichimoku
 
 
 class BasePair:
     def __init__(self, broker, pair_config: BasePairConfig):
         self.broker = broker
-        self.strategy = None
+        self.strategy : MultiIndStrategy = None
         self.symbol = pair_config.symbol  # symbol of the instrument MT5
         self.datasource_symbol = pair_config.ds_symbol  # symbol of the instrument on datasource
         self.data_source = pair_config.data_source
@@ -69,9 +73,9 @@ class BasePair:
                 (((t.minute - t_now.minute + 60) % 60) * 60) +
                 (t.second - t_now.second + 60) % 60)
 
-    def get_time_to_sleep(self, configs: List[CheckedConfigResponse]) -> float:
+    def get_time_to_sleep(self, configs: List[List[CheckedConfigResponse]]) -> float:
        return min(
-            [cnf.applied_config.resolution for cnf in configs],
+            [cnf[0].applied_config.resolution for cnf in configs],
             default=self.min_resolution)
 
     def get_historical_data(self, **kwargs):
@@ -173,7 +177,7 @@ class BasePair:
         else:
             self.positions = [x for x in self.positions if x.identifier in self.orders]
 
-    def get_configs_to_check(self, curr_time: datetime = None) -> List[CheckedConfigResponse]:
+    def get_configs_to_check(self, curr_time: datetime = None) -> List[List[CheckedConfigResponse]]:
         has_opened_positions = not (self.orders is None or len(self.orders) == 0)
 
         if not curr_time:
@@ -181,30 +185,35 @@ class BasePair:
 
         is_time_to_check = {
             k: True if v is None else (v - curr_time).seconds // 60 >= self.__getattribute__(
-                f"{k}_config").resolution for k, v
+                f"{k.value}_config").resolution for k, v
             in self.last_check_time.items()}
         result = []
-        if is_time_to_check[ConfigType.open] and curr_time.hour not in self.open_config.no_entry_hours:  # and not has_opened_positions
-            result.append(CheckedConfigResponse(applied_config=self.open_config,
+        if is_time_to_check[ConfigType.open] and curr_time.hour not in self.open_config.no_entry_hours and self.strategy.max_position_count > len(self.positions):  # and not has_opened_positions
+            result.append([CheckedConfigResponse(applied_config=self.open_config,
                                                 available_actions=[self.broker.ORDER_TYPE_BUY,
-                                                                   self.broker.ORDER_TYPE_SELL]))
+                                                                   self.broker.ORDER_TYPE_SELL])])
         if has_opened_positions and ConfigType.close in is_time_to_check and is_time_to_check[ConfigType.close]:
-            result.append(CheckedConfigResponse(applied_config=self.close_config,
-                                                available_actions=[self.broker.TRADE_ACTION_SLTP,
-                                                                   (self.positions[0].type + 1) % 2]))
+            if self.open_config.resolution == self.close_config.resolution and len(result) > 0:
+                result[0].append(CheckedConfigResponse(applied_config=self.close_config,
+                                                       available_actions=[self.broker.TRADE_ACTION_SLTP,
+                                                                          (self.positions[0].type + 1) % 2]))
+            else:
+                result.append([CheckedConfigResponse(applied_config=self.close_config,
+                                                    available_actions=[self.broker.TRADE_ACTION_SLTP,
+                                                                       (self.positions[0].type + 1) % 2])])
         return result
 
-    def update_last_check_time(self, configs: List[CheckedConfigResponse], curr_time: datetime = None):
+    def update_last_check_time(self, configs: List[List[CheckedConfigResponse]], curr_time: datetime = None):
         if not curr_time:
             curr_time = datetime.now()
 
-        for k in [cnf.applied_config.type for cnf in configs]:
+        for k in [cnf[0].applied_config.type for cnf in configs]:
             self.last_check_time[k] = curr_time
 
         if self.last_check_time[ConfigType.close.value] is None:
             self.last_check_time[ConfigType.close.value] = curr_time
 
-    def make_trade_action(self, type_action: int, action_details: ActionDetails, **kwargs):
+    def make_trade_action(self, type_action: int, action_details: ActionDetails | MultiIndBuySellActionDetails, **kwargs):
         print(f"{self.symbol}, Orders before making action: {self.orders}")
 
         curr_time = action_details.curr_time
@@ -219,6 +228,16 @@ class BasePair:
                                                 **kwargs)
                 # if order is completed
                 if response and response.retcode == 10009:
+                    print(response)
+                    db_client.insert_trade(symbol=self.symbol,
+                                           divergence=action_details.divergence,
+                                           ichimoku=action_details.ichimoku_trends,
+                                           broker_order=str(response.order),
+                                           side="buy" if type_action==0 else "sell",
+                                           open_price=response.price,
+                                           volume=response.volume,
+                                           open_stop_loss=response.request.sl
+                                           )
                     self.orders.append(response.order)
 
                 logging.info(f"{curr_time}, open position: {response}")
@@ -228,11 +247,19 @@ class BasePair:
                 responses = self.close_opened_position(price=action_details.price,
                                                        type_action=type_action,
                                                        positive_only=positive_only,
+                                                       bot_stop_coefficient=action_details.bot_stop_coefficient,
                                                        **kwargs)
                 print(responses)
                 for resp in responses:
                     if resp and not isinstance(resp, str):
                         if resp.retcode == 10009:
+                            self.orders.remove(resp.request.position)
+                            db_client.close_trade(broker_order=str(resp.request.position),
+                                                  reason=action_details.reason,
+                                                  close_price=action_details.price,
+                                                  profit=[x.profit for x in self.positions if x.identifier == resp.request.position][0],
+                                                  divergence=action_details.divergence,
+                                                  ichimoku=action_details.ichimoku_trends)
                             self.orders.remove(resp.request.position)
                 logging.info(f"{curr_time}, close position: {responses}")
 
@@ -289,7 +316,7 @@ class BasePair:
         self.update_last_check_time(configs_to_check)
 
         for cnf in configs_to_check:
-            resolution = cnf.applied_config.resolution
+            resolution = cnf[0].applied_config.resolution
             data = self.get_historical_data(resolution=resolution)
 
             if data is None:
@@ -304,7 +331,7 @@ class BasePair:
                                                                    verbose=True)
             self.logger.info(f"{datetime.now()}, action: {type_action} {action_details if type_action else ''}")
 
-            if type_action in cnf.available_actions:
+            if type_action in list(itertools.chain.from_iterable([x.available_actions for x in cnf])):
 
                 if len(self.orders) == 0 and self.time_to_trade:
                     print(f"Waiting for {self.time_to_trade} to trade")
@@ -364,6 +391,7 @@ class BasePair:
 
     def close_opened_position(self, price: float, type_action: Union[str, int], identifiers: List[int] = None,
                               positive_only: bool = False, **kwargs) -> list:
+
         if identifiers is None:
             identifiers = self.orders
 
@@ -388,8 +416,9 @@ class BasePair:
             }
 
             func_stop = np.less if position.type == 0 else lambda x, y: np.greater(x, 2 - y)
-            if func_stop(position.price_current / position.price_open, bot_stop_coefficient):
-                print(f'{position.symbol}: Close position {position.identifier} because of bot stop {bot_stop_coefficient}')
+            if bot_stop_coefficient and func_stop(position.price_current / position.price_open, bot_stop_coefficient):
+                print(
+                    f'{position.symbol}: Close position {position.identifier} because of bot stop {bot_stop_coefficient}')
                 responses.append(self.broker.order_send(request))
 
             elif not positive_only or position.profit >= 0:
@@ -442,7 +471,7 @@ class MultiIndPair(BasePair):
 
         is_time_to_check = {
             k: True if v is None else (v - curr_time).seconds // 60 >= self.__getattribute__(
-                f"{k}_config").resolution for k, v
+                f"{k.value}_config").resolution for k, v
             in self.last_check_time.items()}
 
         if has_opened_positions and self.strategy.direction in [Direction.swing, Direction.low_long, Direction.high_short] and is_time_to_check[ConfigType.open]:
