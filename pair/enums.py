@@ -54,3 +54,9 @@ class IchimokuTrend(str, Enum):
     strong_bearish = "Strong Bearish"
     bearish = "Bearish"
     consolidation = "Consolidation"
+
+
+class ClosePositionReason(str, Enum):
+    bot_stop = "Bot stop"
+    ichimoku = "Ichimoku trend"
+    divergence = "Divergence"

@@ -72,7 +72,7 @@ if __name__ == "__main__":
             kws.update({"capital_conn": capital_conn})
 
         for symbol, params in config.symbol_parameters.items():
-            combined_data = {**config.dict(), **params, "symbol": symbol}
+            combined_data = {**config.model_dump(mode="json"), **params, "symbol": symbol}
             pair_config: PairConfig = PairConfig.model_validate(combined_data)
 
             pool.apply_async(continuous_trading_pair, args=(pair_config,), kwds=kws,

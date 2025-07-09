@@ -83,6 +83,7 @@ class BaseActionDetails(BaseModel):
 class BuySellActionDetails(BaseActionDetails):
     price: float = None
     positive_only: bool = False
+    bot_stop_coefficient: float = None
 
 
 class ModifySLActionDetails(BaseActionDetails):

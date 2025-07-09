@@ -1,6 +1,7 @@
 from pydantic import BaseModel
-from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, BaseActionDetails
-from pair.enums import DivegenceType
+from .base_models import BaseTradeConfig, BaseOpenConfig, BaseCloseConfig, Symbol, \
+    BuySellActionDetails
+from pair.enums import DivegenceType, IchimokuTrend, ClosePositionReason
 from typing import Union, Any, Tuple, List
 
 
@@ -54,6 +55,7 @@ class OpenConfig(BaseOpenConfig):
     entry: dict
     bollinger: Union[Any, None] = None
     next_position_bol_check: bool = False
+    max_position_count: Union[int, None] = None
 
 
 class CloseConfig(BaseCloseConfig):
@@ -84,5 +86,23 @@ class BotConfig(BaseConfig):
 
 class PairConfig(BaseConfig, Symbol):
     symbol: str
+
+class DivergenceCountResponse(BaseModel):
+    top_cnt: int = 0
+    bottom_cnt: int = 0
+    top_triggered: List[str] = []
+    bottom_triggered: List[str] = []
+
+class IchimokuTrendResponse(BaseModel):
+    long: IchimokuTrend
+    short: IchimokuTrend
+    long_tf: int
+    short_tf: int
+
+class MultiIndBuySellActionDetails(BuySellActionDetails):
+    divergence: DivergenceCountResponse = None
+    ichimoku_trends: IchimokuTrendResponse = None
+    reason: ClosePositionReason = None
+
 
 
