@@ -10,8 +10,7 @@ from typing import List, Union
 from .external_history import get_yahoo_data, get_twelvedata
 from .enums import DataSource, ConfigType, Direction, ActionMethod
 from .strategy import MultiIndStrategy, RelatedStrategy
-from models.multiind_models import PairConfig, DivergenceCountResponse, IchimokuTrendResponse, \
-    MultiIndBuySellActionDetails
+from models.multiind_models import PairConfig, MultiIndBuySellActionDetails
 from models.base_models import BasePairConfig, BaseOpenConfig, MakeTradingStepResponse, CheckedConfigResponse, MT5Broker, ActionDetails
 from models.vix_models import RelatedPairConfig, RelatedOpenConfig
 import MetaTrader5Copy as mt2
@@ -19,7 +18,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import itertools
-from .ta_utils import ichimoku
 
 
 class BasePair:
@@ -247,16 +245,14 @@ class BasePair:
                 responses = self.close_opened_position(price=action_details.price,
                                                        type_action=type_action,
                                                        positive_only=positive_only,
-                                                       bot_stop_coefficient=action_details.bot_stop_coefficient,
                                                        **kwargs)
                 print(responses)
                 for resp in responses:
                     if resp and not isinstance(resp, str):
                         if resp.retcode == 10009:
-                            self.orders.remove(resp.request.position)
                             db_client.close_trade(broker_order=str(resp.request.position),
                                                   reason=action_details.reason,
-                                                  close_price=action_details.price,
+                                                  close_price=float(action_details.price),
                                                   profit=[x.profit for x in self.positions if x.identifier == resp.request.position][0],
                                                   divergence=action_details.divergence,
                                                   ichimoku=action_details.ichimoku_trends)
@@ -309,7 +305,7 @@ class BasePair:
             elif method == ActionMethod.alarm:
                 self.make_alarm_action(type_action)
 
-    def make_trading_step(self) -> MakeTradingStepResponse:
+    async def make_trading_step(self) -> MakeTradingStepResponse:
         self.update_positions()
 
         configs_to_check = self.get_configs_to_check()
@@ -318,16 +314,14 @@ class BasePair:
         for cnf in configs_to_check:
             resolution = cnf[0].applied_config.resolution
             data = self.get_historical_data(resolution=resolution)
-
             if data is None:
                 return MakeTradingStepResponse(is_success=False, time_to_sleep=resolution * 60)
-
-            type_action, action_details = self.strategy.get_action(data=data,
+            type_action, action_details = await self.strategy.get_action(data=data,
                                                                    symbol=self.symbol,
                                                                    positions=self.positions,
                                                                    stop_coefficient=self.broker_stop_coefficient,
                                                                    trade_tick_size=self.trade_tick_size,
-                                                                   config=cnf.applied_config,
+                                                                   config=cnf[0].applied_config,
                                                                    verbose=True)
             self.logger.info(f"{datetime.now()}, action: {type_action} {action_details if type_action else ''}")
 

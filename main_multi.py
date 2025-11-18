@@ -12,9 +12,13 @@ from utils import wait_for_next_hour, sleep_with_dummy_requests
 from pair.external_history import CapitalConnection
 from models.multiind_models import BotConfig, PairConfig
 from pair.enums import DataSource
+import asyncio
 
 
-def continuous_trading_pair(p_config: PairConfig, **kwargs):
+def run_async(func, *args, **kwargs):
+    return asyncio.run(func(*args, **kwargs))
+
+async def continuous_trading_pair(p_config: PairConfig, **kwargs):
     tz = timezone(timedelta(hours=1))
     logging.basicConfig(level=logging.INFO,
                         format='%(message)s',
@@ -29,7 +33,7 @@ def continuous_trading_pair(p_config: PairConfig, **kwargs):
 
     while True:
         try:
-            response = p.make_trading_step()
+            response = await p.make_trading_step()
             if not response.is_success:
                 print(f"{p.symbol}, Something went wrong in making trading step")
             sleep_with_dummy_requests(response.time_to_sleep, p, **kwargs)
@@ -75,7 +79,9 @@ if __name__ == "__main__":
             combined_data = {**config.model_dump(mode="json"), **params, "symbol": symbol}
             pair_config: PairConfig = PairConfig.model_validate(combined_data)
 
-            pool.apply_async(continuous_trading_pair, args=(pair_config,), kwds=kws,
+            pool.apply_async(run_async,
+                             args=(continuous_trading_pair, pair_config),
+                             kwds=kws,
                              error_callback=print_error)
 
     except KeyboardInterrupt:

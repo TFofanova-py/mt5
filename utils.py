@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import json
 from time import sleep
 from typing import Union
 from pair.multiindpair import BasePair, MultiIndPair, RelatedPair
@@ -28,3 +29,8 @@ def sleep_with_dummy_requests(delay: int, p: Union[BasePair, MultiIndPair, Relat
             p.get_historical_data(**kwargs)  # dummy request to don't lose the api session
 
         sleep((delay % request_freq) * 60)
+
+
+def log_json(logger, level, message, **kwargs):
+    log_record = {"message": message, "level": level, "fields": kwargs}
+    logger.log(level, json.dumps(log_record))
